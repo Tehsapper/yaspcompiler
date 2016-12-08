@@ -6,46 +6,67 @@
 	(lambda (l)
 		(if (null? l) 
 			'() 
-			(begin 
+			(if (= (length l) 1) (set! l '()) (begin 
 				(set-car! l (car (cdr l))) 
 				(set-cdr! l (cdr (cdr l))) 
-				l))))
+				l)))))
 
 (define car-advance
 	(lambda (l)
 		(let ((old (car l))) (begin (advance l) old))))
 
-(define (get-next-token input)
-	(let (;(input (opt-args args 0 #f))
-		  ;(acc (opt-args args 1 ""))
-		  (top #\s))
+(define operator?
+	(lambda (char) (memq char '(#\+ #\- #\/ #\% #\( #\) #\{ #\} #\= #\;))))
 
-	(define (skip? char) 
-	(or (eq? (car char) #\space) 
-		(null? (car char)) 
-		(eq? (car char) #\tab) 
-		(eq? (car char) #\newline)))
+(define (get-next-token input)
+	(let ((top #\s))
+
+	(define (skip? char)
+		(char-whitespace? char))
 
 	(define get-next-numerical 
-		(lambda (i a))
+		(lambda (a i) (if (char-numeric? (car i)) (get-next-numerical (string-append a (string (car input))) (advance input)) a)))
 
-	(define (get-next-alphanum . args) )
+	(define get-next-alphanum
+		(lambda (a i) (if (or (char-numeric? (car i)) (char-alphabetic? (car i))) (get-next-alphanum (string-append a (string (car input))) (advance input)) a)))
 
 	(define (get-next-quoted . args) args)
 
-	(define (get-next-operator . args) args)
+	;they can be compound in theory, like operator -> in C
+	(define get-next-operator 
+		(lambda (a i )
+				(cond 	( (eq? a #\( ) 'token-left-bracket)
+				 		( (eq? a #\) ) 'token-right-bracket)
+						( (eq? a #\{ ) 'token-left-curly-bracket)
+						( (eq? a #\} ) 'token-right-curly-bracket)
+				  		( (eq? a #\+ ) 'token-plus)
+				  		( (eq? a #\- ) 'token-minus)
+				  		( (eq? a #\/ ) 'token-div)
+				  		( (eq? a #\% ) 'token-mod)
+				  		( (eq? a #\= ) 'token-equals)
+				  		( (eq? a #\; ) 'token-semicolon)
+				  		(else (error "bad operator" a))
+				)
+			))
 	
 	(define (save-car l) 
 		(begin 
 			(set! top (car-advance l)) 
 			l))
 	
-	(cond 	((null? input) acc)
-			((skip? input) (get-next-token (advance input)));(if (string-null? acc) (get-next-token (advance input)) acc))
-			((char-alphabetic? (car input)) (get-next-alphanum (string (car input)) (advance input)));(string-append acc (string top))))
-			((char-numeric? (car input)) (get-next-numerical (string (car input)) (advance input)))
-			(else (if (string-null? acc) (string (car-advance input)) acc)))))
+	(cond 	((null? input) '())
+			((skip? (car input)) (get-next-token (advance input)))
+			((char-alphabetic? (car input)) (list 'token-symbol  (string->symbol (get-next-alphanum (string (car input)) (advance input)))))
+			((char-numeric? (car input)) (list 'token-number (string->number (get-next-numerical (string (car input)) (advance input)))))
+			((operator? (car input)) (get-next-operator (car input) (advance input)))
+			(else (error "unknown token " (car input))))))
 
+(define tokenize
+	(lambda (input)
+		(let f ((t (get-next-token input)))
+				(if (null? t) 
+				(begin (display "nil") '())
+				(cons t (f (tokenize input)))))))
 
 (define (read-file filename) 
 	(call-with-input-file filename 
