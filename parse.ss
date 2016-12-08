@@ -1,72 +1,62 @@
-(define opt-args 
-	(lambda (args n default) 
-		(if (< n (length args)) (list-ref args n) default)))
-
-(define advance
-	(lambda (l)
-		(if (null? l) 
-			'() 
-			(if (= (length l) 1) (set! l '()) (begin 
-				(set-car! l (car (cdr l))) 
-				(set-cdr! l (cdr (cdr l))) 
-				l)))))
-
-(define car-advance
-	(lambda (l)
-		(let ((old (car l))) (begin (advance l) old))))
-
-(define operator?
-	(lambda (char) (memq char '(#\+ #\- #\/ #\% #\( #\) #\{ #\} #\= #\;))))
-
-(define (get-next-token input)
-	(let ((top #\s))
+(define (parse-next-token input)
+	(let ((bp '()))
 
 	(define (skip? char)
 		(char-whitespace? char))
 
-	(define get-next-numerical 
-		(lambda (a i) (if (char-numeric? (car i)) (get-next-numerical (string-append a (string (car input))) (advance input)) a)))
+	(define operator?
+		(lambda (char) (memq char '(#\+ #\- #\/ #\% #\( #\) #\{ #\} #\= #\; #\,))))
 
-	(define get-next-alphanum
-		(lambda (a i) (if (or (char-numeric? (car i)) (char-alphabetic? (car i))) (get-next-alphanum (string-append a (string (car input))) (advance input)) a)))
+	(define parse-next-numerical 
+		(lambda (a i) 
+			(if (char-numeric? (car i)) 
+				(parse-next-numerical (string-append a (string (car i))) (cdr i)) 
+				(list i 'token-number (string->number a)))))
 
-	(define (get-next-quoted . args) args)
+	(define parse-next-alphanum
+		(lambda (a i) 
+			(if (or (char-numeric? (car i)) (char-alphabetic? (car i))) 
+				(parse-next-alphanum (string-append a (string (car i))) (cdr i)) 
+				(list i 'token-symbol (string->symbol a)))))
+
+	(define (parse-next-quoted . args) args)
 
 	;they can be compound in theory, like operator -> in C
-	(define get-next-operator 
+	(define parse-next-operator 
 		(lambda (a i )
-				(cond 	( (eq? a #\( ) 'token-left-bracket)
-				 		( (eq? a #\) ) 'token-right-bracket)
-						( (eq? a #\{ ) 'token-left-curly-bracket)
-						( (eq? a #\} ) 'token-right-curly-bracket)
-				  		( (eq? a #\+ ) 'token-plus)
-				  		( (eq? a #\- ) 'token-minus)
-				  		( (eq? a #\/ ) 'token-div)
-				  		( (eq? a #\% ) 'token-mod)
-				  		( (eq? a #\= ) 'token-equals)
-				  		( (eq? a #\; ) 'token-semicolon)
+				(cond 	( (eq? a #\( ) (list i 'token-left-bracket))
+				 		( (eq? a #\) ) (list i 'token-right-bracket))
+						( (eq? a #\{ ) (list i 'token-left-curly-bracket))
+						( (eq? a #\} ) (list i 'token-right-curly-bracket))
+				  		( (eq? a #\+ ) (list i 'token-plus))
+				  		( (eq? a #\- ) (list i 'token-minus))
+				  		( (eq? a #\/ ) (list i 'token-div))
+				  		( (eq? a #\% ) (list i 'token-mod))
+				  		( (eq? a #\= ) (list i 'token-equals))
+				  		( (eq? a #\; ) (list i 'token-semicolon))
+				  		( (eq? a #\, ) (list i 'token-comma))
 				  		(else (error "bad operator" a))
 				)
 			))
 	
-	(define (save-car l) 
-		(begin 
-			(set! top (car-advance l)) 
-			l))
-	
-	(cond 	((null? input) '())
-			((skip? (car input)) (get-next-token (advance input)))
-			((char-alphabetic? (car input)) (list 'token-symbol  (string->symbol (get-next-alphanum (string (car input)) (advance input)))))
-			((char-numeric? (car input)) (list 'token-number (string->number (get-next-numerical (string (car input)) (advance input)))))
-			((operator? (car input)) (get-next-operator (car input) (advance input)))
+	(cond 	((null? input) 
+				'())
+			((skip? (car input)) 
+				(parse-next-token (cdr input)))
+			((char-alphabetic? (car input)) 
+				(parse-next-alphanum (string (car input)) (cdr input)))
+			((char-numeric? (car input)) 
+				(parse-next-numerical (string (car input)) (cdr input)))
+			((operator? (car input)) 
+				(parse-next-operator (car input) (cdr input)))
 			(else (error "unknown token " (car input))))))
 
 (define tokenize
 	(lambda (input)
-		(let f ((t (get-next-token input)))
-				(if (null? t) 
-				(begin (display "nil") '())
-				(cons t (f (tokenize input)))))))
+		(let f ((token (parse-next-token input)))
+				(if (null? token) 
+					'()
+					(cons (cdr token) (f (parse-next-token (car token))))))))
 
 (define (read-file filename) 
 	(call-with-input-file filename 
