@@ -7,6 +7,12 @@
 	(define operator?
 		(lambda (char) (memq char '(#\+ #\- #\/ #\% #\( #\) #\{ #\} #\= #\; #\, #\*))))
 
+	(define quote?
+		(lambda (char) (memq char '(#\"))))
+
+	(define escape?
+		(lambda (char) (eq? char #\\)))
+
 	(define parse-next-numerical 
 		(lambda (a i) 
 			(if (char-numeric? (car i)) 
@@ -19,7 +25,20 @@
 				(parse-next-alphanum (string-append a (string (car i))) (cdr i)) 
 				(list i 'token-symbol (string->symbol a)))))
 
-	(define (parse-next-quoted . args) args)
+	(define parse-next-escape
+		(lambda (a i)
+			(if (or (eq? (car i) #\\) (eq? (car i) #\")) 
+				(parse-next-quoted (string-append a (string (car i))) (cdr i))
+				(error "unknown escaped char" (car i)))))
+
+	(define parse-next-quoted 
+		(lambda (a i) 
+			(cond ((quote? (car i)) 
+					(list i 'token-string a))
+			      ((escape? (car i)) 
+			      	(parse-next-escape (string-append a (string (car i))) (cdr i))) 
+				  (else 
+				  	(parse-next-quoted (string-append a (string (car i))) (cdr i))))))
 
 	;they can be compound in theory, like operator -> in C
 	(define parse-next-operator 
@@ -30,8 +49,8 @@
 						( (eq? a #\} ) (list i 'token-right-curly-bracket))
 				  		( (eq? a #\+ ) (list i 'token-plus))
 				  		( (eq? a #\- ) (list i 'token-minus))
-				  		( (eq? a #\/ ) (list i 'token-div))
-				  		( (eq? a #\% ) (list i 'token-mod))
+				  		( (eq? a #\/ ) (list i 'token-divide))
+				  		( (eq? a #\% ) (list i 'token-percent))
 				  		( (eq? a #\= ) (list i 'token-equals))
 				  		( (eq? a #\; ) (list i 'token-semicolon))
 				  		( (eq? a #\, ) (list i 'token-comma))
@@ -48,6 +67,8 @@
 				(parse-next-alphanum (string (car input)) (cdr input)))
 			((char-numeric? (car input)) 
 				(parse-next-numerical (string (car input)) (cdr input)))
+			((quote? (car input))
+				(parse-next-quoted "" (cdr input)))
 			((operator? (car input)) 
 				(parse-next-operator (car input) (cdr input)))
 			(else (error "unknown token " (car input))))))
@@ -75,6 +96,7 @@
 			(cond 
 				((eq? msg 'pop!) pop!)
 				((eq? msg 'push!) push!)
+				((eq? msg 'list) stack)
 				(else (error "unknown call" msg))))
 		dispatch))
 
@@ -106,11 +128,6 @@
 				  ((eq? m 'peek) peek)
 				  (else (error "unknown call" m))))
 		dispatch))
-
-(define (get-next-token tokens)
-	(if (or (variable-bound? t) (null? (variable-ref t)))
-		(begin (variable-set! t (cdr (variable-ref t))) (car (variable-ref t)))
-		(begin (variable-set! t tokens) (car (variable-ref t)))))
 
 (define (read-file filename) 
 	(call-with-input-file filename 
