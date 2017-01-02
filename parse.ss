@@ -13,6 +13,9 @@
 	(define escape?
 		(lambda (char) (eq? char #\\)))
 
+	(define name?
+		(lambda (char) (or (char-alphabetic? char) (eq? char #\_))))
+
 	(define parse-next-numerical 
 		(lambda (a i) 
 			(if (char-numeric? (car i)) 
@@ -21,7 +24,7 @@
 
 	(define parse-next-alphanum
 		(lambda (a i) 
-			(if (or (char-numeric? (car i)) (char-alphabetic? (car i))) 
+			(if (or (char-numeric? (car i)) (name? (car i))) 
 				(parse-next-alphanum (string-append a (string (car i))) (cdr i)) 
 				(list i 'token-symbol (string->symbol a)))))
 
@@ -63,7 +66,7 @@
 				'())
 			((skip? (car input)) 
 				(parse-next-token (cdr input)))
-			((char-alphabetic? (car input)) 
+			((name? (car input)) 
 				(parse-next-alphanum (string (car input)) (cdr input)))
 			((char-numeric? (car input)) 
 				(parse-next-numerical (string (car input)) (cdr input)))

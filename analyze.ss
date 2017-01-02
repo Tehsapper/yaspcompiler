@@ -231,8 +231,8 @@
 		  (statements (analyze-statements tokens env))
 		  (rbracket ((tokens 'has-next) 'token-right-curly-bracket)))
 		(delete-context env)
-		(if (or (null? lbracket) (null? statements) (null? rbracket)) 
-			'() 
+		(if (or (null? lbracket) (null? rbracket)) 
+			'block-fail 
 			statements)))
 
 (define make-function-ast
@@ -240,33 +240,48 @@
 		(declare-function (list name return_type args) env)
 		(list 'function name return_type args block)))
 
-(define (analyze-args tokens env)
+(define (analyze-function-args-list tokens env)
+	((tokens 'save))
 	(let 	((type (analyze-type tokens))
-			(name (analyze-name tokens))
-			(next ((tokens 'get-next))))
+			(name (analyze-name tokens)))
 			
-			(cond 	((or (null? type) (null? name)) (error "bad tokens at function args" type name))
-					((eq? (car next) 'token-comma) (cons (list type name) (analyze-args tokens env)))
-					((eq? (car next) 'token-right-bracket) (cons (list type name) '()))
-					(else (error "bad tokens")))))
+			(if (not (or (null? type) (eq? type 'void) (null? name))) ;arg can't be void :{ 
+				(begin
+					((tokens 'accept))
+					(declare-variable (list name type) env)
+					(if (null? ((tokens 'has-next) 'token-comma))
+						(if (null? ((tokens 'has-next) 'token-right-bracket)) 
+							(error "analyze-function-args-list: bad token" ((tokens 'peek)))
+							(cons (list type name) '()))
+						(cons (list type name) (analyze-function-args-list tokens env))))
+				(fail tokens))))
+
+(define (analyze-function-args tokens env)
+	(let ((arg-list (analyze-function-args-list tokens env)))
+		(if (null? arg-list) 
+			(if (null? ((tokens 'has-next) 'token-right-bracket)) (error "analyze-function-args: bad token" ((tokens 'peek))) (list 'void))
+			arg-list)))
 
 (define (analyze-function tokens env)
-	(let ((rtype (analyze-type tokens))
-		  (name (analyze-name tokens))
-		  (lbracket ((tokens 'has-next) 'token-left-bracket)))
+	((tokens 'save))
+	(create-context env)
+	(let    ((rtype (analyze-type tokens))
+			(name (analyze-name tokens))
+		 	(lbracket ((tokens 'has-next) 'token-left-bracket)))
 
-			(create-context env)
-		  
-		  (if (or (null? rtype) (null? name) (null? lbracket))
-		  	(begin 
-		  		(delete-context env)
-		  		'())
-		  	(let ((args (analyze-args tokens env)) ;args can (not yet) be null and they eat the right bracket
-		  		  (block (analyze-block tokens env)))
-				(delete-context env)
-				(if (null? block) 
-					'()
-					(make-function-ast rtype name args block env))))))
+		  	(if (or (null? rtype) (null? name) (null? lbracket))
+		  		(begin 
+		  			(delete-context env)
+		  			(fail tokens))
+		  		(let ((args (analyze-function-args tokens env)) ;args eat the right bracket
+		  			  (block (analyze-block tokens env)))
+						
+						(delete-context env)
+						(if (eq? block 'block-fail) ;block actually can be empty 
+							(fail tokens)
+							(begin
+								((tokens 'accept))
+								(make-function-ast rtype name args block env)))))))
 
 (define (analyze token-list)
 	(let ((env (make-environment))
