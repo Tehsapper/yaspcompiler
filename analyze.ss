@@ -13,6 +13,7 @@
 (define (environment-ctx-vars env) (cadr env)) 
 (define (environment-local-vars env) (car ((environment-ctx-vars env) 'list)))
 (define (environment-functions env) (caddr env))
+(define local-var-count 0)
 
 (define (fail t) ((t 'restore)) '())
 (define (success t p) ((t 'accept)) (p))
@@ -34,9 +35,11 @@
 	(if (eq? (cadr var) 'void) 
 		(error "variable cannot be void" var)
 		(if (null? (look-up-variable (car var) env)) 
-			(if (null? (environment-local-vars env)) 
-				(set-car! ((environment-ctx-vars env) 'list) (list var)) 
-				(append! (environment-local-vars env) (list var)))
+			(begin
+				(if (null? (environment-local-vars env)) 
+					(set-car! ((environment-ctx-vars env) 'list) (list var)) 
+					(append! (environment-local-vars env) (list var)))
+				(set! local-var-count (+ local-var-count 1)))
 			(error "variable already declared" (car var)))))
 
 (define (look-up-variable name env)
@@ -149,7 +152,7 @@
 (define (analyze-func-call choices tokens env)
 	((tokens 'save))
 	(let ((name (analyze-name tokens)))
-
+	; we do not check whether the function with this actually exists on this pass
 	(if (null? name)
 		(fail tokens)
 		(let ((lbracket ((tokens 'has-next) 'token-left-bracket))
@@ -207,7 +210,7 @@
 					(begin 
 						((tokens 'accept)) 
 						(assign! r (list 'return value)))))
-			(begin ((tokens 'restore)) '()))))
+			(fail tokens))))
 
 (define (analyze-statement tokens env)
 	(let ((r (list '())))
@@ -238,31 +241,34 @@
 (define make-function-ast
 	(lambda (return_type name args block env) 
 		(declare-function (list name return_type args) env)
-		(list 'function name return_type args block)))
+		(list 'function name return_type args block local-var-count)))
 
 (define (analyze-function-args-list tokens env)
 	((tokens 'save))
 	(let 	((type (analyze-type tokens))
 			(name (analyze-name tokens)))
 			
-			(if (not (or (null? type) (eq? type 'void) (null? name))) ;arg can't be void :{ 
+			(if (not (or (null? type) (null? name)))
 				(begin
 					((tokens 'accept))
 					(declare-variable (list name type) env)
 					(if (null? ((tokens 'has-next) 'token-comma))
 						(if (null? ((tokens 'has-next) 'token-right-bracket)) 
 							(error "analyze-function-args-list: bad token" ((tokens 'peek)))
-							(cons (list type name) '()))
-						(cons (list type name) (analyze-function-args-list tokens env))))
+							(cons (list name type) '()))
+						(cons (list name type) (analyze-function-args-list tokens env))))
 				(fail tokens))))
 
 (define (analyze-function-args tokens env)
 	(let ((arg-list (analyze-function-args-list tokens env)))
 		(if (null? arg-list) 
-			(if (null? ((tokens 'has-next) 'token-right-bracket)) (error "analyze-function-args: bad token" ((tokens 'peek))) (list 'void))
+			(if (null? ((tokens 'has-next) 'token-right-bracket)) 
+				(error "analyze-function-args: bad token" ((tokens 'peek))) 
+				(list 'void))
 			arg-list)))
 
 (define (analyze-function tokens env)
+	(set! local-var-count 0)
 	((tokens 'save))
 	(create-context env)
 	(let    ((rtype (analyze-type tokens))
