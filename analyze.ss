@@ -10,9 +10,6 @@
 (define (environment-functions env) (caddr env))
 (define (get-local-var-count env) (cdddr (car (reverse (environment-functions env)))))
 
-(define (fail t) ((t 'restore)) '())
-(define (success t p) ((t 'accept)) (p))
-
 (define (analyze-type tokens)
 	(let ((x ((tokens 'has-next) 'token-symbol)))
 		(if (null? x) '() 
@@ -74,18 +71,6 @@
 				(car funcs) 
 				(loop (cdr funcs))))))
 
-(define (analyze-declaration r tokens env)
-	((tokens 'save))
-	(let ((type (analyze-type tokens))
-		  (name (analyze-name tokens))
-		  (semicolon ((tokens 'has-next) 'token-semicolon)))
-		(if (or (null? type) (null? name) (null? semicolon)) 
-			(fail tokens)
-			(begin
-				((tokens 'accept))
-				(declare-variable (list name type) env) 
-				(assign! r (list 'declaration name type))))))
-
 (define (analyze-variable tokens env)
 	(let ((name (analyze-name tokens)))
 		(if (null? name) 
@@ -122,7 +107,7 @@
 						(let [(func (look-up-function (cadr t) env))]
 							(if (null? func)
 								(error "unknown named identifier: " (cadr t))
-								(analyze-func-value t tokens env)))
+								(analyze-func-value func tokens env)))
 						(list 'var-value (var-name var) (var-type var)))))
 			(else (error "unknown identifier: " t)))))
 
@@ -133,7 +118,7 @@
 		  	expr)))
 		  	
 
-(define (analyze-func-value t tokens env)
+(define (analyze-func-value func tokens env)
 	(let [(call-list '())]
 
 		(define (arg-loop)
@@ -148,14 +133,14 @@
 		  			call-list)))
 
 		(if (null? ((tokens 'has-next) 'token-left-bracket))
-			(error "missing parentheses in function call" (cadr t))
+			(error "missing parentheses in function call" (func-name func))
 		  	(begin
 		  		(if (eq? ((tokens 'peek)) 'token-right-bracket)
 		  			(set! call-list '(void))
 		  			(arg-loop))
 		  		(if (null? ((tokens 'has-next) 'token-right-bracket))
-		  			(error "mismatched parentheses in function call" (cadr t))
-		  			(list 'function-call (cadr t) call-list))))))
+		  			(error "mismatched parentheses in function call" (func-name func))
+		  			(list 'function-call (func-name func) (func-return-type func) call-list ))))))
 		  	
 
 (define (analyze-cast left tokens env)
@@ -214,6 +199,8 @@
 
 (define (get-type exp env)
 	(cond
+		((type? exp) exp)
+		((null? exp) 'void)
 		((binop? exp) (get-type (caddr exp) env))
 		((const? exp) (caddr exp))
 		((relop? exp) 'int)
@@ -223,40 +210,98 @@
 
 (define (check-types exp1 exp2 env) (eq? (get-type exp1 env) (get-type exp2 env)))
 
-(define (analyze-assignment r tokens env)
+(define (analyze-declaration choices tokens env)
 	((tokens 'save))
-	(let ((var (analyze-variable tokens env)))
-		(if (null? var) 
-			(fail tokens)
-			(let [(eqv ((tokens 'has-next) 'token-equals))
-		  		  (value (analyze-value-pratt tokens env))]
-				(if (or (null? eqv) (null? value) (not (eq? (car ((tokens 'peek))) 'token-semicolon)))
-					(fail tokens)
-					(begin
-						((tokens 'advance))
-						((tokens 'accept)) 
-						(assign! r (list 'assignment (var-name var) value))))))))
+	(let [(type (analyze-type tokens))
+		  (name (analyze-name tokens))
+		  (semicolon ((tokens 'has-next) 'token-semicolon))]
+		(if (or (null? type) (null? name) (null? semicolon)) 
+			(fail choices tokens env)
+			(begin
+				(declare-variable (list name type) env) 
+				(success tokens (list 'declaration name type))))))
 
-(define (analyze-return r tokens env)
+(define (analyze-assignment choices tokens env)
 	((tokens 'save))
-	(let ((ret (analyze-name tokens)))
+	(let [(var (analyze-variable tokens env))]
+		(if (null? var) 
+			(fail choices tokens env)
+			(let [(eqv ((tokens 'has-next) 'token-equals))
+		  		  (value (analyze-value tokens env))]
+				(if (or (null? eqv) (null? value) (not ((tokens 'has-next) 'token-semicolon)))
+					(fail choices tokens env)
+					(if (check-types (var-type var) value env)
+						(success tokens (list 'assignment (var-name var) value))
+						(error "mismatched variable and assigned value types")))))))
+
+(define (analyze-return choices tokens env)
+	((tokens 'save))
+	(let [(ret (analyze-name tokens))]
 		(if (eq? ret 'return)
-			(let [(value (analyze-value-pratt tokens env))]
-				(if (or (null? value) (not (eq? (car ((tokens 'peek))) 'token-semicolon)))
-					(fail tokens)
-					(begin 
-						((tokens 'advance))
-						((tokens 'accept)) 
-						(assign! r (list 'return value)))))
-			(fail tokens))))
+			(let [(value '())]
+				(display ((tokens 'peek))) (newline)
+				(if (not (eq? (car ((tokens 'peek))) 'token-semicolon))
+					(set! value (analyze-value tokens env)))
+				(display value) (newline)
+				(if ((tokens 'has-next) 'token-semicolon)
+					(if (check-types value (func-return-type (car (reverse (environment-functions env)))) env)
+						(success tokens (list 'return value))
+						(error "mismatched function and returned types"))
+					(error "bad return")))
+			(fail choices tokens env))))
+
+(define (analyze-func-call choices tokens env)
+	((tokens 'save))
+	(let [(func (look-up-function (analyze-name tokens) env))]
+		(if (null? func)
+			(fail choices tokens env)
+			(let [(value (analyze-func-value func tokens env))]
+				(if ((tokens 'has-next) 'token-semicolon)
+					(success tokens value)
+					(fail choices tokens env))))))
+
+(define (analyze-conditional choices tokens env)
+	((tokens 'save))
+	(let [(if-keyword (analyze-name tokens))]
+		(if (and (eq? if-keyword 'if) ((tokens 'has-next) 'token-left-bracket))
+			(let [(value (analyze-value tokens env))]
+				(if ((tokens 'has-next) 'token-right-bracket)
+					(let [(main-clause (analyze-block tokens env))]
+						(if (eq? main-clause 'block-fail)
+							(error "main clause block fail")
+							(let [(else-keyword ((tokens 'peek)))
+								  (else-clause '())]
+								(if (and (eq? (car else-keyword) 'token-symbol) (eq? (cadr else-keyword) 'else))
+									(begin
+										((tokens 'advance))
+										(set! else-clause (analyze-block tokens env))))
+								(if (eq? else-clause 'block-fail) (error "else clause block fail"))
+								(success tokens (list 'conditional value main-clause else-clause)))))
+					(error "mismatched parentheses at if condition")))	; if we matched both if keyword and a left-bracket, we're assured
+			(fail choices tokens env))))
+
+(define (analyze-end-of-block choices tokens env)
+	(if (eq? (car ((tokens 'peek))) 'token-right-curly-bracket)
+		'()		;valid statement
+		(error "unknown statement type starting with token" ((tokens 'peek)))))
+
+(define statement-choices (list analyze-declaration
+								analyze-assignment
+								analyze-return
+								analyze-func-call
+								analyze-conditional
+								analyze-end-of-block))
+
+(define (fail choices tokens env)
+	((tokens 'restore))
+	((car choices) (cdr choices) tokens env))
+
+(define (success tokens tree-node)
+	((tokens 'accept)) 
+	tree-node)
 
 (define (analyze-statement tokens env)
-	(let ((r (list '())))
-		(cond ((not (null? (analyze-declaration r tokens env))) (car r))
-			  ((not (null? (analyze-assignment r tokens env))) (car r))
-			  ((not (null? (analyze-return r tokens env))) (car r))
-			  ((eq? (car ((tokens 'peek))) 'token-right-curly-bracket) '())
-			  (else (error "unknown statement type starting with token" ((tokens 'peek)))))))
+	((car statement-choices) (cdr statement-choices) tokens env))
 
 (define (analyze-statements tokens env)
 	(let rec ((statement (analyze-statement tokens env)))
@@ -281,18 +326,20 @@
 
 (define (analyze-function-args-list tokens env)
 	((tokens 'save))
-	(let 	((type (analyze-type tokens))
-			(name (analyze-name tokens)))
+	(let   [(type (analyze-type tokens))
+			(name (analyze-name tokens))]
 			
-			(if (not (or (null? type) (null? name)))
+			(if (or (null? type) (null? name))
+				(begin 
+					((tokens 'restore))
+					'())
 				(begin
 					((tokens 'accept))
 					(if (null? ((tokens 'has-next) 'token-comma))
 						(if (null? ((tokens 'has-next) 'token-right-bracket)) 
 							(error "analyze-function-args-list: bad token" ((tokens 'peek)))
 							(cons (list name type) '()))
-						(cons (list name type) (analyze-function-args-list tokens env))))
-				(fail tokens))))
+						(cons (list name type) (analyze-function-args-list tokens env)))))))
 
 (define (analyze-function-args tokens env)
 	(let ((arg-list (analyze-function-args-list tokens env)))
@@ -312,22 +359,27 @@
 		  	(if (or (null? return-type) (null? name) (null? left-bracket))
 		  		(begin 
 		  			(delete-context env)
-		  			(fail tokens))
+		  			((tokens 'restore))
+		  			'())
 		  		(let [(args (analyze-function-args tokens env))]
+
 		  			(declare-function (list name return-type args 0) env)
 		  			(if (not (eq? (car args) 'void)) (for-each (lambda (arg) (declare-variable (list (var-name arg) (var-type arg)) env)) args))
 		  			(let [(block (analyze-block tokens env))]
 						(delete-context env)
 						(if (eq? block 'block-fail) ;block actually can be empty 
 							(error "bad function block")
-							;(fail tokens)
 							(begin
 								((tokens 'accept))
 								(make-function-ast return-type name args block env))))))))
 
+(define (declare-builtin env)
+	(for-each (lambda (f) (declare-function f env)) builtin-funcs))
+
 (define (analyze token-list)
 	(let ((env (make-environment))
 		  (token-provider (make-token-provider token-list)))
+	(declare-builtin env)
 	(let rec ((func (analyze-function token-provider env)))
 		(if (null? func) 
 			'()

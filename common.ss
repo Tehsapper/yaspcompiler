@@ -24,8 +24,13 @@
 
 (define (binop? exp) (memq (car exp) '(add divide modulo substract multiply)))
 
-(define (relop? exp) (memq (car exp) '(equals greater less greater-or-equal less-or-equal not)))
+(define (relop? exp) (memq (car exp) '(equals greater less greater-or-equals less-or-equals not)))
 
+(define builtin-funcs (list (list 'iprint 'void (list (list 'number 'int)) 1)
+							(list 'sprint 'void (list (list 'str 'string)) 1)
+							(list 'dprint 'void (list (list 'number 'double)) 1)))
+
+(define (builtin-func? exp) (assq (cadr exp) builtin-funcs))
 
 
 (define (index str pool fail)

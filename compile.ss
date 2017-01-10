@@ -6,6 +6,16 @@
 
 (define currently-compiled-func 0)
 
+(define op-list '(INVALID
+				  LOAD LOADS
+				  DADD IADD DSUB ISUB DMUL IMUL DDIV IDIV IMOD DNEG INEG 
+				  IPRINT DPRINT SPRINT 
+				  I2D D2I S2I 
+				  SWAP POP LOADVAR LOADSVAR LOADCTXVAR STOREVAR STORECTXVAR
+				  DCMP ICMP
+				  JA IFICMPNE IFICMPE IFICMPG IFICMPGE IFICMPL IFICMPLE
+				  DUMP STOP CALL RETURN BREAK))
+
 (define (make-writer output)
 	(let [(size 0)]
 		(define (write-byte char)
@@ -29,17 +39,25 @@
 			(put-u8 output (logand (ash int -16) #xFF))
 			(put-u8 output (logand (ash int -24) #xFF))
 			(set! size (+ size 4)))
+		(define (write-int16 int)
+			(put-u8 output (logand int #xFF))
+			(put-u8 output (logand (ash int -8) #xFF))
+			(set! size (+ size 2)))
 		(define (write-string str)
 			(for-each write-byte (map char->integer (string->list str))))
+		(define (write-op op)
+			(write-byte (index op op-list (lambda () (error "no such operand" op)))))
 		(define (dispatch m) 
 			(cond ((eq? m 'write-sequence) write-sequence)
 				  ((eq? m 'write-int64) write-int64)
 				  ((eq? m 'write-int32) write-int32)
+				  ((eq? m 'write-int16) write-int16)
 				  ((eq? m 'write-string) write-string)
 				  ((eq? m 'write-byte) write-byte)
+				  ((eq? m 'write-op) write-op)
 				  ((eq? m 'size) size)
 				  ((eq? m 'port) output)
-				  (else (error "unknown call" m))))
+				  (else (error "make-writer: unknown dispatch call" m))))
 	
 		dispatch))
 
@@ -96,12 +114,22 @@
 	((writer 'write-sequence) #x16) ;LOADVAR
 	((writer 'write-int32) (get-var-id (cadr exp) meta))) 
 
+(define (compile-builtin-func exp writer meta)
+	(cond 
+		((eq? (cadr exp) 'iprint) ((writer 'write-op) 'IPRINT))
+		((eq? (cadr exp) 'dprint) ((writer 'write-op) 'DPRINT))
+		((eq? (cadr exp) 'sprint) ((writer 'write-op) 'SPRINT))
+		(else (error "unimplemented builtin function " (cadr exp)))))
+
 (define (compile-func-call exp writer meta)
 	;push values onto stack
-	(for-each (lambda (e) (compile-value e writer meta)) (caddr exp))
+	(for-each (lambda (e) (compile-value e writer meta)) (cadddr exp))
 	;call the function
-	((writer 'write-sequence) #x26) ;CALL
-	((writer 'write-int64) (((meta 'func-pool) 'find) (cadr exp))))
+	(if (builtin-func? exp)
+		(compile-builtin-func exp writer meta)
+		(begin
+			((writer 'write-sequence) #x26) ;CALL
+			((writer 'write-int64) (((meta 'func-pool) 'find) (cadr exp))))))
 
 (define (compile-binop exp writer meta)
 	(compile-value (cadr exp) writer meta)
@@ -109,7 +137,31 @@
 	(cond 
 		((tagged? exp 'add) ((writer 'write-sequence) #x04))
 		((tagged? exp 'multiply) ((writer 'write-sequence) #x08))
-		(else (error "unimplemented binop " (cadr exp)))))
+		((tagged? exp 'substract) ((writer 'write-op) 'ISUB))
+		(else (error "unimplemented binop " (car exp)))))
+
+(define (compile-relop exp writer meta)
+	(compile-value (cadr exp) writer meta)
+	(compile-value (caddr exp) writer meta)
+	(cond 
+		((tagged? exp 'greater)
+			((writer 'write-op) 'IFICMPG))
+		((tagged? exp 'greater-or-equals)
+			((writer 'write-op) 'IFICMPGE))
+		((tagged? exp 'less)
+			((writer 'write-op) 'IFICMPL))
+		((tagged? exp 'less-or-equals)
+			((writer 'write-op) 'IFICMPLE))
+		((tagged? exp 'equals)
+			((writer 'write-op) 'IFICMPE))
+		)
+	((writer 'write-int16) 11)
+	((writer 'write-op) 'LOAD)
+	((writer 'write-int64) 0)
+	((writer 'write-op) 'JA)
+	((writer 'write-int16) 9)
+	((writer 'write-op) 'LOAD)
+	((writer 'write-int64) 1))
 
 (define (compile-cast exp writer meta)
 	(compile-value (cadddr exp) writer meta)
@@ -130,10 +182,12 @@
 
 (define (compile-value exp writer pool)
 	(cond 
+		((null? exp) '())
 		((const? exp) (compile-const-value exp writer pool))
 		((var? exp) (compile-var-value exp writer pool))
 		((func-call? exp) (compile-func-call exp writer pool))
 		((binop? exp) (compile-binop exp writer pool))
+		((relop? exp) (compile-relop exp writer pool))
 		((cast? exp) (compile-cast exp writer pool))
 		(else (error "unknown value type " (car exp)))))
 
@@ -142,9 +196,27 @@
 	((writer 'write-sequence) #x19) ;STOREVAR
 	((writer 'write-int32) (get-var-id (cadr exp) meta))) ;4-byte var ID
 
-(define (compile-conditional exp target link)
-	'()
-	)
+(define (compile-conditional exp writer meta)
+	(let [(main-bytecode (make-writer (open-output-string)))
+		  (else-bytecode (make-writer (open-output-string)))]
+
+		(compile-sequence (caddr exp) main-bytecode meta)
+		(compile-sequence (cadddr exp) else-bytecode meta)
+		(if (not (null? (cadddr exp)))
+			(begin 
+				((main-bytecode 'write-op) 'JA)
+				((main-bytecode 'write-int16) (else-bytecode 'size))
+				))
+
+	(compile-value (cadr exp) writer meta)
+	((writer 'write-op) 'LOAD)
+	((writer 'write-int64) 0)
+	((writer 'write-op) 'IFICMPLE)
+	((writer 'write-int16) (main-bytecode 'size))
+	((writer 'write-string) (get-output-string (main-bytecode 'port)))
+	((writer 'write-string) (get-output-string (else-bytecode 'port)))
+	
+	))
 
 (define (compile-expression exp writer meta)
 	(cond 	((declaration? exp)
@@ -153,6 +225,12 @@
 				(compile-assignment exp writer meta))
 			((return? exp)
 				(compile-return exp writer meta))
+			((conditional? exp)
+				(compile-conditional exp writer meta))
+			((func-call? exp)
+				(begin
+					(compile-func-call exp writer meta)
+					(if (not (eq? (caddr exp) 'void)) ((writer 'write-op) 'POP)))) ;we don't need the returned value on the stack, only the side effects
 			(else (error "unknown expression type " (car exp)))))
 
 (define (compile-sequence exp writer meta)

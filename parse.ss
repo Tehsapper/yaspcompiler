@@ -3,7 +3,7 @@
 		(char-whitespace? char))
 
 	(define operator?
-		(lambda (char) (memq char '(#\+ #\- #\/ #\% #\( #\) #\{ #\} #\= #\; #\, #\* #\! #\& #\|))))
+		(lambda (char) (memq char '(#\+ #\- #\/ #\% #\( #\) #\{ #\} #\= #\; #\, #\* #\! #\& #\| #\> #\<))))
 
 	(define quote?
 		(lambda (char) (memq char '(#\"))))
