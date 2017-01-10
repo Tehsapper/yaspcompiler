@@ -1,15 +1,8 @@
 ;(import (rnrs (6)))
 (use-modules (ice-9 binary-ports))
+(load "common.ss")
 (load "analyze.ss")
 (load "parse.ss")
-
-(define (tagged? exp tag) (if (eq? (car exp) tag) #t #f))
-
-(define (const? exp)
-	(cond 	((tagged? exp 'const-value) #t)
-			(else #f)))
-
-(define (lookup-var varname) #t)
 
 (define currently-compiled-func 0)
 
@@ -61,12 +54,6 @@
 				((eq? m 'func-pool) func-pool)))
 		dispatch))
 
-(define (index str pool fail)
-	(let ((tail (member str (reverse pool))))
-    	(if tail 
-    		(length (cdr tail))
-    		(fail))))
-
 (define (make-const-pool)
 	(let [(count 0)
 		  (pool '())]
@@ -92,22 +79,6 @@
 				  (else (error "unknown call" m))))
 		dispatch))
 
-(define (var? exp)
-	(cond 	((null? (lookup-var exp)) #f)
-			(else #t)))
-
-(define (assignment? exp) (tagged? exp 'assignment))
-
-(define (conditional? exp) (tagged? exp 'conditional))
-
-(define (declaration? exp) (tagged? exp 'declaration))
-
-(define (return? exp) (tagged? exp 'return))
-
-(define (function? exp) (tagged? exp 'function))
-
-(define (binop? exp) (memq (car exp) '(add divide modulo substract multiply)))
-
 (define (get-var-id id meta) 
 	(((meta 'local-vars) 'add) id))
 
@@ -126,9 +97,8 @@
 	((writer 'write-int32) (get-var-id (cadr exp) meta))) 
 
 (define (compile-func-call exp writer meta)
-	;TO-DO: multiple args
 	;push values onto stack
-	(compile-value (caddr exp) writer meta)
+	(for-each (lambda (e) (compile-value e writer meta)) (caddr exp))
 	;call the function
 	((writer 'write-sequence) #x26) ;CALL
 	((writer 'write-int64) (((meta 'func-pool) 'find) (cadr exp))))
@@ -141,24 +111,36 @@
 		((tagged? exp 'multiply) ((writer 'write-sequence) #x08))
 		(else (error "unimplemented binop " (cadr exp)))))
 
+(define (compile-cast exp writer meta)
+	(compile-value (cadddr exp) writer meta)
+
+	(cond 
+		((eq? (cadr exp) 'int)
+			(if (eq? (caddr exp) 'double)
+				((writer 'write-sequence) #x12)		;D2I
+				(error (caddr exp) " to " (cadr exp) " cast not implemented")))
+		((eq? (cadr exp) 'double)
+			(if (eq? (caddr exp) 'int)
+				((writer 'write-sequence) #x11)		;I2D
+				(error (caddr exp) " to " (cadr exp) " cast not implemented")))
+		(else (error (caddr exp) " to " (cadr exp) " cast not implemented")))) 
 
 (define (compile-var-decl exp writer meta)
 	(((meta 'local-vars) 'add) (cadr exp)))
 
 (define (compile-value exp writer pool)
 	(cond 
-		((tagged? exp 'const-value) (compile-const-value exp writer pool))
-		((tagged? exp 'var-value) (compile-var-value exp writer pool))
-		((tagged? exp 'function-call) (compile-func-call exp writer pool))
+		((const? exp) (compile-const-value exp writer pool))
+		((var? exp) (compile-var-value exp writer pool))
+		((func-call? exp) (compile-func-call exp writer pool))
 		((binop? exp) (compile-binop exp writer pool))
+		((cast? exp) (compile-cast exp writer pool))
 		(else (error "unknown value type " (car exp)))))
 
 (define (compile-assignment exp writer meta)
 	(compile-value (caddr exp) writer meta)
 	((writer 'write-sequence) #x19) ;STOREVAR
-	((writer 'write-int32) (get-var-id (cadr exp) meta)) ;4-byte var ID
-	)
-
+	((writer 'write-int32) (get-var-id (cadr exp) meta))) ;4-byte var ID
 
 (define (compile-conditional exp target link)
 	'()
@@ -228,11 +210,9 @@
 		((writer 'write-sequence) #xBA #xBA))
 	(define (write-version)
 		((writer 'write-int64) 1))
-	
 	(define (write-functions)
 		;number of functions
 		((writer 'write-int64) (length ast)))
-
 	(define (write-const-pool)
 		;const-pool size
 		((writer 'write-int64) (+ ((meta 'const-pool) 'size) 

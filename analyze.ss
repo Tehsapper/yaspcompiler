@@ -1,10 +1,5 @@
+(load "common.ss")
 (load "parse.ss")
-
-(define (type? x) (memq x '(string int double void)))
-(define (hasnull? x) (memq '() x))
-
-(define (assign! list v)
-	(set-car! list v) v)
 
 (define make-environment
 	(lambda () (list 'env (make-stack) '())))
@@ -13,7 +8,7 @@
 (define (environment-ctx-vars env) (cadr env)) 
 (define (environment-local-vars env) (car ((environment-ctx-vars env) 'list)))
 (define (environment-functions env) (caddr env))
-(define local-var-count 0)
+(define (get-local-var-count env) (cdddr (car (reverse (environment-functions env)))))
 
 (define (fail t) ((t 'restore)) '())
 (define (success t p) ((t 'accept)) (p))
@@ -28,25 +23,33 @@
 		(if (null? x) '() (cadr x))))
 
 (define (create-context env) (((environment-ctx-vars env) 'push!) (list '())))
-
 (define (delete-context env) (((environment-ctx-vars env) 'pop!)))
 
+(define (var-type var) (cadr var))
+(define (var-name var) (car var))
+
+(define (func-return-type func) (cadr func))
+(define (func-name func) (car func))
+(define (func-args func) (caddr func))
+
 (define (declare-variable var env)
-	(if (eq? (cadr var) 'void) 
+	(if (eq? (var-type var) 'void) 
 		(error "variable cannot be void" var)
-		(if (null? (look-up-variable (car var) env)) 
+		(if (null? (look-up-variable (var-name var) env)) 
 			(begin
 				(if (null? (environment-local-vars env)) 
 					(set-car! ((environment-ctx-vars env) 'list) (list var)) 
 					(append! (environment-local-vars env) (list var)))
-				(set! local-var-count (+ local-var-count 1)))
-			(error "variable already declared" (car var)))))
+				(set-car! (get-local-var-count env) (+ (car (get-local-var-count env)) 1)))
+			(error "variable already declared" (var-name var)))))
 
 (define (look-up-variable name env)
-	(define (local-loop var)
-		(if (null? var) 
+	(define (local-loop vars)
+		(if (null? vars) 
 			'()
-			(if (eq? (caar var) name) name (local-loop (cdr var)))))
+			(if (eq? (var-name (car vars)) name) 
+				(car vars)
+				(local-loop (cdr vars)))))
 	(define (loop ctx)
 		(if (null? ctx) 
 			'()
@@ -57,17 +60,19 @@
 	(loop ((environment-ctx-vars env) 'list)))
 
 (define (declare-function func env)
-	(if (null? (look-up-function (car func) env)) 
+	(if (null? (look-up-function (func-name func) env)) 
 			(if (null? (environment-functions env)) 
 				(set-car! (cddr env) (list func)) 
 				(append! (environment-functions env) (list func)))
-			(error "function already declared" (car func))))
+			(error "function already declared" (func-name func))))
 
 (define (look-up-function name env)
-	(let loop ((var (environment-functions env)))
-		(if (null? var) 
+	(let loop ((funcs (environment-functions env)))
+		(if (null? funcs) 
 			'()
-			(if (eq? (caar var) name) name (loop (cdr var))))))
+			(if (eq? (func-name (car funcs)) name) 
+				(car funcs) 
+				(loop (cdr funcs))))))
 
 (define (analyze-declaration r tokens env)
 	((tokens 'save))
@@ -87,127 +92,160 @@
 			'()
 			(look-up-variable name env))))
 
-(define (analyze-binop choices tokens env operator tag)
-	((tokens 'save))
-	(let ((arg1 (analyze-value choices tokens env)))
-		(if (null? arg1)
-			(fail tokens)
-			(let ((op ((tokens 'has-next) operator))
-		  		  (arg2 (analyze-value default-value-choices tokens env)))
-		 
-				  (if (or (null? op) (null? arg2))
-						(fail tokens)
-						(begin ((tokens 'accept)) (list tag arg1 arg2)))))))
+(define infix '((token-plus 10 add) 
+				(token-minus 10 substract)
+				(token-star 20 multiply)
+				(token-divide 20 divide)
+				(token-percent 20 modulo)
+				(token-greater 5 greater)
+				(token-greater-equals 5 greater-or-equals)
+				(token-less 5 less)
+				(token-less-equals 5 less-or-equals)
+				(token-equals 5 equals)
+				(token-logical-and 2 and)
+				(token-logical-or 2 or)))
 
-(define (analyze-addition choices tokens env)
-	(analyze-binop choices tokens env 'token-plus 'add))
+(define prefix '((token-minus 100 neg)
+				 (token-bang 100 not)))
 
-(define (analyze-multiply choices tokens env)
-	(analyze-binop choices tokens env 'token-star 'multiply))
+(define (analyze-unary t tokens env)
+	(let [(pre (assq (car t) prefix))]
+		(cond 
+			(pre (list (caddr pre) (analyze-expression (cadr pre) tokens env)))
+			((tagged? t 'token-left-bracket) (analyze-brackets t tokens env))
+			((tagged? t 'token-plus) (analyze-expression 100 tokens env)) ;unary plus
+			((tagged? t 'token-number) (list 'const-value (cadr t) 'int))
+			((tagged? t 'token-string) (list 'const-value (cadr t) 'string))
+			((tagged? t 'token-symbol) 
+				(let [(var (look-up-variable (cadr t) env))]
+					(if (null? var) 
+						(let [(func (look-up-function (cadr t) env))]
+							(if (null? func)
+								(error "unknown named identifier: " (cadr t))
+								(analyze-func-value t tokens env)))
+						(list 'var-value (var-name var) (var-type var)))))
+			(else (error "unknown identifier: " t)))))
 
-(define (analyze-substraction choices tokens env)
-	(analyze-binop choices tokens env 'token-minus 'substract))
+(define (analyze-brackets t tokens env)
+	(let [(expr (analyze-expression 0 tokens env))]
+		(if (null? ((tokens 'has-next) 'token-right-bracket))
+		  	(error "unbalanced parentheses in expression" ((tokens 'peek)))
+		  	expr)))
+		  	
 
-(define (analyze-division choices tokens env)
-	(analyze-binop choices tokens env 'token-divide 'divide))
+(define (analyze-func-value t tokens env)
+	(let [(call-list '())]
 
-(define (analyze-modulo choices tokens env)
-	(analyze-binop choices tokens env 'token-percent 'modulo))
+		(define (arg-loop)
+			(let [(value (analyze-expression 0 tokens env))]
+		  		(if (null? call-list)
+		  			(set! call-list (list value))
+		  			(append! call-list (list value)))
+		  		(if (eq? (car ((tokens 'peek))) 'token-comma) 
+		  			(begin
+		  				((tokens 'advance))
+		  				(arg-loop))
+		  			call-list)))
 
+		(if (null? ((tokens 'has-next) 'token-left-bracket))
+			(error "missing parentheses in function call" (cadr t))
+		  	(begin
+		  		(if (eq? ((tokens 'peek)) 'token-right-bracket)
+		  			(set! call-list '(void))
+		  			(arg-loop))
+		  		(if (null? ((tokens 'has-next) 'token-right-bracket))
+		  			(error "mismatched parentheses in function call" (cadr t))
+		  			(list 'function-call (cadr t) call-list))))))
+		  	
 
-(define (analyze-brackets choices tokens env)
-	((tokens 'save))
-	; we try to find at least a partial match before delving into recursive hell
-	(let ((lbracket ((tokens 'has-next) 'token-left-bracket)))
-		(if (null? lbracket) 
-			(fail tokens)			;we'll try other variants
-			(let ((value (analyze-value default-value-choices tokens env))
-		  		  (rbracket ((tokens 'has-next) 'token-right-bracket)))
-				
-				(if (or (null? value) (null? rbracket))
-					(begin ((tokens 'restore)) '())
-					(begin ((tokens 'accept)) value))))))
+(define (analyze-cast left tokens env)
+	(let [(type (analyze-type tokens))]
+		(if (null? type)
+			(error "bad cast to unknown type" type)
+			(if (or (eq? 'void (get-type left env)) (eq? 'void type)) 
+				(error "cannot cast void value or to void type")
+				(list 'cast type (get-type left env) left)))))
 
-; can be string
-(define (analyze-const-value choices tokens env)
-	((tokens 'save))
-	(let ((value ((tokens 'has-next) 'token-number)))
+(define (analyze-binary t left tokens env)
+	(let [(in (assq (car t) infix))]
+		(cond 
+			(in (let [(right (analyze-expression (cadr in) tokens env))]
+					(if (check-types left right env) 
+						(list (caddr in) left right)
+						(error "type mismatch" (get-type left env) (get-type right env)))))
+			((tagged? t 'token-pointer) (analyze-cast left tokens env))
+			(else (error "unknown binary operator" (car t))))))
 
-	(if (null? value)
-		(fail tokens)
-		(begin 
-			((tokens 'accept)) 
-			(list 'const-value (cadr value))))))
+(define (get-binding-power t)
+	(let [(in (assq (car t) infix))
+		  (pre (assq (car t) prefix))]
+	(cond 
+		(in (cadr in))
+		(pre (cadr pre))
+		((tagged? t 'token-left-bracket) 0)
+		((tagged? t 'token-right-bracket) 0)
+		((tagged? t 'token-comma) 0)
+		((tagged? t 'token-pointer) 200)
+		((tagged? t 'token-semicolon) 0))))
 
-(define (analyze-var-value choices tokens env)
-	((tokens 'save))
-	(let ((var (analyze-variable tokens env)))
+(define (analyze-value tokens env)
+	(analyze-expression 0 tokens env))
 
-	(if (null? var)
-		(fail tokens)
-		(begin 
-			((tokens 'accept)) 
-			(list 'var-value var)))))
+(define (analyze-expression rbp tokens env)
+	(let [(t ((tokens 'get-next)))
+		  (left '())]
+		
+		(define (loop) 
+			(if (< rbp (get-binding-power ((tokens 'peek)) ))
+				(begin
+					(set! t ((tokens 'get-next)))
+					(set! left (analyze-binary t left tokens env))
+					(loop)
+				)))
+		(set! left (analyze-unary t tokens env))
+		(loop)
+		left))
 
-(define (analyze-func-call choices tokens env)
-	((tokens 'save))
-	(let ((name (analyze-name tokens)))
-	; we do not check whether the function with this actually exists on this pass
-	(if (null? name)
-		(fail tokens)
-		(let ((lbracket ((tokens 'has-next) 'token-left-bracket))
-			  (value (analyze-value default-value-choices tokens env)) ;multiple args soon
-			  (rbracket ((tokens 'has-next) 'token-right-bracket)))
-			(if (or (null? lbracket) (null? value) (null? rbracket))
-				(fail tokens)
-				(begin 
-					((tokens 'accept)) 
-					(list 'function-call name value)))))))
+(define (check-signature sig call)
+	(cond 
+		((and (null? sig) (null? call)) #t)
+		((not (eq? (car sig) (car call))) #f)
+		(else (check-signature (cdr sig) (cdr call)))))
 
-(define default-value-choices (list analyze-addition
-									analyze-substraction 
-									analyze-multiply
-									;analyze-division
-									;analyze-modulo
-									analyze-brackets
-									analyze-var-value
-									analyze-func-call
-									analyze-const-value 
-									))
+(define (get-type exp env)
+	(cond
+		((binop? exp) (get-type (caddr exp) env))
+		((const? exp) (caddr exp))
+		((relop? exp) 'int)
+		((cast? exp) (cadr exp))
+		((var? exp) (var-type (look-up-variable (cadr exp) env)))
+		((func-call? exp) (func-return-type (look-up-function (cadr exp) env)))))
 
-(define (analyze-value choices tokens env)
-	(if (null? choices) 
-		'()
-		(let ((value ((car choices) (cdr choices) tokens env)))
-			(if (null? value) 
-				(analyze-value (cdr choices) tokens env) 
-				value))))
+(define (check-types exp1 exp2 env) (eq? (get-type exp1 env) (get-type exp2 env)))
 
 (define (analyze-assignment r tokens env)
 	((tokens 'save))
 	(let ((var (analyze-variable tokens env)))
 		(if (null? var) 
 			(fail tokens)
-			(let ((eqv ((tokens 'has-next) 'token-equals))
-		  		  (value (analyze-value default-value-choices tokens env))
-		  		  (semicolon ((tokens 'has-next) 'token-semicolon)))
-		
-					(if (or (null? eqv) (null? value) (null? semicolon))
-						(fail tokens)
-						(begin 
-							((tokens 'accept)) 
-							(assign! r (list 'assignment var value))))))))
+			(let [(eqv ((tokens 'has-next) 'token-equals))
+		  		  (value (analyze-value-pratt tokens env))]
+				(if (or (null? eqv) (null? value) (not (eq? (car ((tokens 'peek))) 'token-semicolon)))
+					(fail tokens)
+					(begin
+						((tokens 'advance))
+						((tokens 'accept)) 
+						(assign! r (list 'assignment (var-name var) value))))))))
 
 (define (analyze-return r tokens env)
 	((tokens 'save))
 	(let ((ret (analyze-name tokens)))
 		(if (eq? ret 'return)
-			(let ((value (analyze-value default-value-choices tokens env))
-		  		  (semicolon ((tokens 'has-next) 'token-semicolon)))
-		
-				(if (or (null? value) (null? semicolon))
+			(let [(value (analyze-value-pratt tokens env))]
+				(if (or (null? value) (not (eq? (car ((tokens 'peek))) 'token-semicolon)))
 					(fail tokens)
 					(begin 
+						((tokens 'advance))
 						((tokens 'accept)) 
 						(assign! r (list 'return value)))))
 			(fail tokens))))
@@ -218,8 +256,7 @@
 			  ((not (null? (analyze-assignment r tokens env))) (car r))
 			  ((not (null? (analyze-return r tokens env))) (car r))
 			  ((eq? (car ((tokens 'peek))) 'token-right-curly-bracket) '())
-			  (else (error "unknown statement type starting with token" ((tokens 'peek))))
-				)))
+			  (else (error "unknown statement type starting with token" ((tokens 'peek)))))))
 
 (define (analyze-statements tokens env)
 	(let rec ((statement (analyze-statement tokens env)))
@@ -230,18 +267,17 @@
 
 (define (analyze-block tokens env)
 	(create-context env)	; various blocks have their own scope
-	(let ((lbracket ((tokens 'has-next) 'token-left-curly-bracket))
+	(let [(left-bracket ((tokens 'has-next) 'token-left-curly-bracket))
 		  (statements (analyze-statements tokens env))
-		  (rbracket ((tokens 'has-next) 'token-right-curly-bracket)))
+		  (right-bracket ((tokens 'has-next) 'token-right-curly-bracket))]
 		(delete-context env)
-		(if (or (null? lbracket) (null? rbracket)) 
-			'block-fail 
+		(if (or (null? left-bracket) (null? right-bracket)) 
+			'block-fail
 			statements)))
 
 (define make-function-ast
 	(lambda (return_type name args block env) 
-		(declare-function (list name return_type args) env)
-		(list 'function name return_type args block local-var-count)))
+		(list 'function name return_type args block (car (get-local-var-count env)))))
 
 (define (analyze-function-args-list tokens env)
 	((tokens 'save))
@@ -251,7 +287,6 @@
 			(if (not (or (null? type) (null? name)))
 				(begin
 					((tokens 'accept))
-					(declare-variable (list name type) env)
 					(if (null? ((tokens 'has-next) 'token-comma))
 						(if (null? ((tokens 'has-next) 'token-right-bracket)) 
 							(error "analyze-function-args-list: bad token" ((tokens 'peek)))
@@ -268,26 +303,27 @@
 			arg-list)))
 
 (define (analyze-function tokens env)
-	(set! local-var-count 0)
 	((tokens 'save))
 	(create-context env)
-	(let    ((rtype (analyze-type tokens))
+	(let   [(return-type (analyze-type tokens))
 			(name (analyze-name tokens))
-		 	(lbracket ((tokens 'has-next) 'token-left-bracket)))
+		 	(left-bracket ((tokens 'has-next) 'token-left-bracket))]
 
-		  	(if (or (null? rtype) (null? name) (null? lbracket))
+		  	(if (or (null? return-type) (null? name) (null? left-bracket))
 		  		(begin 
 		  			(delete-context env)
 		  			(fail tokens))
-		  		(let ((args (analyze-function-args tokens env)) ;args eat the right bracket
-		  			  (block (analyze-block tokens env)))
-						
+		  		(let [(args (analyze-function-args tokens env))]
+		  			(declare-function (list name return-type args 0) env)
+		  			(if (not (eq? (car args) 'void)) (for-each (lambda (arg) (declare-variable (list (var-name arg) (var-type arg)) env)) args))
+		  			(let [(block (analyze-block tokens env))]
 						(delete-context env)
 						(if (eq? block 'block-fail) ;block actually can be empty 
-							(fail tokens)
+							(error "bad function block")
+							;(fail tokens)
 							(begin
 								((tokens 'accept))
-								(make-function-ast rtype name args block env)))))))
+								(make-function-ast return-type name args block env))))))))
 
 (define (analyze token-list)
 	(let ((env (make-environment))
