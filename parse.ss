@@ -28,16 +28,17 @@
 
 	(define parse-next-escape
 		(lambda (a i)
-			(if (or (eq? (car i) #\\) (eq? (car i) #\")) 
-				(parse-next-quoted (string-append a (string (car i))) (cdr i))
-				(error "unknown escaped char" (car i)))))
+			(cond
+				((or (eq? (car i) #\\) (eq? (car i) #\"))  (parse-next-quoted (string-append a (string (car i))) (cdr i)))
+				((eq? (car i) #\n) (parse-next-quoted (string-append a (string #\newline)) (cdr i)))
+				(else error "unknown escaped char" (car i)))))
 
 	(define parse-next-quoted 
 		(lambda (a i) 
 			(cond ((quote? (car i)) 
-					(list i 'token-string a))
+					(list (cdr i) 'token-string a))
 			      ((escape? (car i)) 
-			      	(parse-next-escape (string-append a (string (car i))) (cdr i))) 
+			      	(parse-next-escape a (cdr i))) 
 				  (else 
 				  	(parse-next-quoted (string-append a (string (car i))) (cdr i))))))
 

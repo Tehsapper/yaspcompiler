@@ -103,15 +103,23 @@
 (define (compile-return exp writer meta)
 	(compile-value (cadr exp) writer meta)
 	(if (eq? currently-compiled-func 'main)
-		((writer 'write-sequence) #x25)   ;STOP
-		((writer 'write-sequence) #x27))) ;RETURN
+		((writer 'write-op) 'STOP)
+		((writer 'write-op) 'RETURN)))
 
 (define (compile-const-value exp writer meta)
-	((writer 'write-sequence) #x01)	;LOAD
-	((writer 'write-int64) (cadr exp)))
+	(cond
+		((eq? (caddr exp) 'int)
+			(begin
+				((writer 'write-op) 'LOAD)
+				((writer 'write-int64) (cadr exp))))
+		((eq? (caddr exp) 'string)
+			(begin
+				((writer 'write-op) 'LOADS)
+				((writer 'write-int64) (((meta 'const-pool) 'add) (cadr exp)))))
+		(else (error "unsupported const value compiling for type " (caddr exp)))))
 
 (define (compile-var-value exp writer meta)
-	((writer 'write-sequence) #x16) ;LOADVAR
+	((writer 'write-op) 'LOADVAR)
 	((writer 'write-int32) (get-var-id (cadr exp) meta))) 
 
 (define (compile-builtin-func exp writer meta)
@@ -128,34 +136,66 @@
 	(if (builtin-func? exp)
 		(compile-builtin-func exp writer meta)
 		(begin
-			((writer 'write-sequence) #x26) ;CALL
+			((writer 'write-op) 'CALL)
 			((writer 'write-int64) (((meta 'func-pool) 'find) (cadr exp))))))
 
 (define (compile-binop exp writer meta)
-	(compile-value (cadr exp) writer meta)
 	(compile-value (caddr exp) writer meta)
+	(compile-value (cadr exp) writer meta)
 	(cond 
-		((tagged? exp 'add) ((writer 'write-sequence) #x04))
-		((tagged? exp 'multiply) ((writer 'write-sequence) #x08))
+		((tagged? exp 'add) ((writer 'write-op) 'IADD))
+		((tagged? exp 'multiply) ((writer 'write-op) 'IMUL))
 		((tagged? exp 'substract) ((writer 'write-op) 'ISUB))
+		((tagged? exp 'modulo) ((writer 'write-op) 'IMOD))
 		(else (error "unimplemented binop " (car exp)))))
 
 (define (compile-relop exp writer meta)
-	(compile-value (cadr exp) writer meta)
 	(compile-value (caddr exp) writer meta)
+	(compile-value (cadr exp) writer meta)
 	(cond 
 		((tagged? exp 'greater)
-			((writer 'write-op) 'IFICMPG))
+			(begin
+				((writer 'write-op) 'IFICMPG)
+				((writer 'write-int16) 12)))
 		((tagged? exp 'greater-or-equals)
-			((writer 'write-op) 'IFICMPGE))
+			(begin
+				((writer 'write-op) 'IFICMPGE)
+				((writer 'write-int16) 12)))
 		((tagged? exp 'less)
-			((writer 'write-op) 'IFICMPL))
+			(begin
+				((writer 'write-op) 'IFICMPL)
+				((writer 'write-int16) 12)))
 		((tagged? exp 'less-or-equals)
-			((writer 'write-op) 'IFICMPLE))
+			(begin
+				((writer 'write-op) 'IFICMPLE)
+				((writer 'write-int16) 12)))
 		((tagged? exp 'equals)
-			((writer 'write-op) 'IFICMPE))
-		)
-	((writer 'write-int16) 11)
+			(begin
+				((writer 'write-op) 'IFICMPE)
+				((writer 'write-int16) 12)))
+		((tagged? exp 'and)
+			(begin
+				((writer 'write-op) 'LOAD)
+				((writer 'write-int64) 0)
+				((writer 'write-op) 'IFICMPGE)
+				((writer 'write-int16) 15)
+				((writer 'write-op) 'LOAD)
+				((writer 'write-int64) 0)
+				((writer 'write-op) 'IFICMPGE)
+				((writer 'write-int16) 3)
+				((writer 'write-op) 'JA)
+				((writer 'write-int16) 12)))
+		((tagged? exp 'or)
+			(begin
+				((writer 'write-op) 'LOAD)
+				((writer 'write-int64) 0)
+				((writer 'write-op) 'IFICMPL)
+				((writer 'write-int16) 24)
+				((writer 'write-op) 'LOAD)
+				((writer 'write-int64) 0)
+				((writer 'write-op) 'IFICMPL)
+				((writer 'write-int16) 12))))
+	
 	((writer 'write-op) 'LOAD)
 	((writer 'write-int64) 0)
 	((writer 'write-op) 'JA)
@@ -169,11 +209,11 @@
 	(cond 
 		((eq? (cadr exp) 'int)
 			(if (eq? (caddr exp) 'double)
-				((writer 'write-sequence) #x12)		;D2I
+				((writer 'write-op) 'D2I)
 				(error (caddr exp) " to " (cadr exp) " cast not implemented")))
 		((eq? (cadr exp) 'double)
 			(if (eq? (caddr exp) 'int)
-				((writer 'write-sequence) #x11)		;I2D
+				((writer 'write-op) 'I2D)
 				(error (caddr exp) " to " (cadr exp) " cast not implemented")))
 		(else (error (caddr exp) " to " (cadr exp) " cast not implemented")))) 
 
@@ -193,7 +233,7 @@
 
 (define (compile-assignment exp writer meta)
 	(compile-value (caddr exp) writer meta)
-	((writer 'write-sequence) #x19) ;STOREVAR
+	((writer 'write-op) 'STOREVAR)
 	((writer 'write-int32) (get-var-id (cadr exp) meta))) ;4-byte var ID
 
 (define (compile-conditional exp writer meta)
@@ -205,18 +245,36 @@
 		(if (not (null? (cadddr exp)))
 			(begin 
 				((main-bytecode 'write-op) 'JA)
-				((main-bytecode 'write-int16) (else-bytecode 'size))
-				))
+				((main-bytecode 'write-int16) (else-bytecode 'size))))
 
-	(compile-value (cadr exp) writer meta)
 	((writer 'write-op) 'LOAD)
 	((writer 'write-int64) 0)
+	(compile-value (cadr exp) writer meta)
 	((writer 'write-op) 'IFICMPLE)
 	((writer 'write-int16) (main-bytecode 'size))
 	((writer 'write-string) (get-output-string (main-bytecode 'port)))
 	((writer 'write-string) (get-output-string (else-bytecode 'port)))
 	
 	))
+
+(define (compile-loop exp writer meta)
+	(let [(bytecode (make-writer (open-output-string)))]
+
+		(compile-sequence (caddr exp) bytecode meta)
+		(if (tagged? exp 'for-loop)
+			(compile-expression (cadr (cdddr exp)) bytecode meta))
+		((bytecode 'write-op) 'JA)
+		((bytecode 'write-int16) (- (bytecode 'size)))
+
+		(if (tagged? exp 'for-loop)
+			(compile-expression (cadddr exp) writer meta))
+
+		((writer 'write-op) 'LOAD)
+		((writer 'write-int64) 0)
+		(compile-value (cadr exp) writer meta)
+		((writer 'write-op) 'IFICMPLE)
+		((writer 'write-int16) (bytecode 'size))
+		((writer 'write-string) (get-output-string (bytecode 'port)))))
 
 (define (compile-expression exp writer meta)
 	(cond 	((declaration? exp)
@@ -227,6 +285,8 @@
 				(compile-return exp writer meta))
 			((conditional? exp)
 				(compile-conditional exp writer meta))
+			((loop? exp)
+				(compile-loop exp writer meta))
 			((func-call? exp)
 				(begin
 					(compile-func-call exp writer meta)
@@ -245,20 +305,20 @@
 				((eq? (cadr (list-ref (cadddr exp) c)) 'double) ((writer 'write-sequence) #x01))
 				((eq? (cadr (list-ref (cadddr exp) c)) 'string) ((writer 'write-sequence) #x02))
 				(else (error (cadr exp) ": unknown argument type " (cadr (list-ref (cadddr exp) c))))))
-		(if (> c 0) (arg-type-loop (- c 1)) '()))
+		(if (> c 0) (arg-type-loop (- c 1))))
 
 	(define (compile-func-bytecode block bytecode meta)
 		(let [(arg-num 0)]
 			(if (not (eq? (car (cadddr exp)) 'void))
 				(for-each 
 					(lambda (e) 
-						((bytecode 'write-sequence) #x19) ;STOREVAR
+						((bytecode 'write-op) 'STOREVAR)
 						((bytecode 'write-int32) arg-num)
 						(((meta 'local-vars) 'add) (car e))
 						(set! arg-num (+ arg-num 1)))
 					(cadddr exp)))
 			(compile-sequence block bytecode meta)
-			(if (eq? (car (cadddr exp)) 'void) ((bytecode 'write-sequence) #x27)) ;RETURN
+			(if (eq? (car (cadddr exp)) 'void) ((bytecode 'write-op) 'RETURN))
 			((writer 'write-int64) (bytecode 'size))
 			((writer 'write-string) (get-output-string (bytecode 'port)))))
 		
@@ -267,7 +327,7 @@
 	(((meta 'func-pool) 'add) (cadr exp))
 	(set! currently-compiled-func (cadr exp))
 	;returns interned id for name from pool
-	((writer 'write-int64) (((meta 'const-pool) 'add) (cadr exp)))
+	((writer 'write-int64) (((meta 'const-pool) 'add) (symbol->string (cadr exp))))
 	;local variable count
 	((writer 'write-int64) (car (cddr (cdddr exp))))
 	;exported -> yes?
@@ -294,10 +354,10 @@
 	(define (write-const-pool)
 		;const-pool size
 		((writer 'write-int64) (+ ((meta 'const-pool) 'size) 
-								  (apply + (map string-length (map symbol->string ((meta 'const-pool) 'list))))))
+								  (apply + (map string-length ((meta 'const-pool) 'list)))))
 		(for-each 
 			(lambda (c) 
-				((writer 'write-string) (symbol->string c)) 
+				((writer 'write-string) c)
 				((writer 'write-sequence) #x00))
 			((meta 'const-pool) 'list)))
 
@@ -306,9 +366,9 @@
 	(write-const-pool)
 	(write-functions))
 
-(define (compile-file input_file output_file)
-	(let [(ast (analyze (tokenize (read-file input_file))))
-		  (writer (make-writer (open-output-file output_file)))
+(define (compile-dwarf-file input-file output-file)
+	(let [(ast (analyze (tokenize (read-file input-file))))
+		  (writer (make-writer (open-output-file output-file)))
 		  (meta (make-meta-info))]
 
 		(define (compile-functions ast)
@@ -324,3 +384,12 @@
 			(compile-header ast writer meta)
 			(write-functions func-bytecode))
 		(close-output-port (writer 'port))))
+
+(define (compile-dwarf output-file . input-files)
+	(let [(meta (make-meta-info))
+		  (writer (make-writer (open-output-file output-file)))
+		  (functions (map (lambda (file) (compile-dwarf-file file meta)) input-files))]
+		
+		(compile-header functions writer meta)
+
+		))

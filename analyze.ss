@@ -280,6 +280,37 @@
 					(error "mismatched parentheses at if condition")))	; if we matched both if keyword and a left-bracket, we're assured
 			(fail choices tokens env))))
 
+(define (analyze-while-loop choices tokens env)
+	((tokens 'save))
+	(let [(while-keyword (analyze-name tokens))]
+		(if (and (eq? while-keyword 'while) ((tokens 'has-next) 'token-left-bracket))
+			(let [(value (analyze-value tokens env))]
+				(if ((tokens 'has-next) 'token-right-bracket)
+					(let [(body (analyze-block tokens env))]
+						(if (eq? body 'block-fail)
+							(error "while body block fail")
+							(success tokens (list 'while-loop value body))))
+					(error "mismatched parentheses at while loop condition")))
+			(fail choices tokens env))))
+
+(define (analyze-for-loop choices tokens env)
+	((tokens 'save))
+	(let [(for-keyword (analyze-name tokens))]
+		(if (and (eq? for-keyword 'for) ((tokens 'has-next) 'token-left-bracket))
+			(let [(initial (analyze-statement (list analyze-assignment analyze-end-of-block) tokens env))
+				  (condition (analyze-value tokens env))]
+				(if ((tokens 'has-next) 'token-semicolon)
+					(let [(post (analyze-statement (list analyze-assignment analyze-end-of-block) tokens env))]
+				  
+						(if ((tokens 'has-next) 'token-right-bracket)
+							(let [(body (analyze-block tokens env))]
+								(if (eq? body 'block-fail)
+									(error "for body block fail")
+									(success tokens (list 'for-loop condition body initial post))))
+							(error "mismatched parentheses at for loop condition")))
+					(error "missing semicolon at for loop")))
+			(fail choices tokens env))))
+
 (define (analyze-end-of-block choices tokens env)
 	(if (eq? (car ((tokens 'peek))) 'token-right-curly-bracket)
 		'()		;valid statement
@@ -290,6 +321,8 @@
 								analyze-return
 								analyze-func-call
 								analyze-conditional
+								analyze-while-loop
+								analyze-for-loop
 								analyze-end-of-block))
 
 (define (fail choices tokens env)
@@ -300,15 +333,15 @@
 	((tokens 'accept)) 
 	tree-node)
 
-(define (analyze-statement tokens env)
-	((car statement-choices) (cdr statement-choices) tokens env))
+(define (analyze-statement choices tokens env)
+	((car choices) (cdr choices) tokens env))
 
 (define (analyze-statements tokens env)
-	(let rec ((statement (analyze-statement tokens env)))
+	(let rec ((statement (analyze-statement statement-choices tokens env)))
 		(display statement) (newline)
 		(if (null? statement)
 			'() 
-			(cons statement (rec (analyze-statement tokens env))))))
+			(cons statement (rec (analyze-statement statement-choices tokens env))))))
 
 (define (analyze-block tokens env)
 	(create-context env)	; various blocks have their own scope

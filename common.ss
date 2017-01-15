@@ -22,9 +22,11 @@
 
 (define (func-call? exp) (tagged? exp 'function-call))
 
+(define (loop? exp) (memq (car exp) '(for-loop while-loop do-loop)))
+
 (define (binop? exp) (memq (car exp) '(add divide modulo substract multiply)))
 
-(define (relop? exp) (memq (car exp) '(equals greater less greater-or-equals less-or-equals not)))
+(define (relop? exp) (memq (car exp) '(equals greater less greater-or-equals less-or-equals not and or)))
 
 (define builtin-funcs (list (list 'iprint 'void (list (list 'number 'int)) 1)
 							(list 'sprint 'void (list (list 'str 'string)) 1)
