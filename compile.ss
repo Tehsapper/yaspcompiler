@@ -1,5 +1,4 @@
-;(import (rnrs (6)))
-(use-modules (ice-9 binary-ports))
+(import (rnrs (6)))
 (load "common.ss")
 (load "analyze.ss")
 (load "parse.ss")
@@ -45,6 +44,9 @@
 			(set! size (+ size 2)))
 		(define (write-string str)
 			(for-each write-byte (map char->integer (string->list str))))
+		(define (write-bytevector bv)
+			(put-bytevector output bv)
+			(set! size (+ size (bytevector-length bv))))
 		(define (write-op op)
 			(write-byte (index op op-list (lambda () (error "no such operand" op)))))
 		(define (dispatch m) 
@@ -53,6 +55,7 @@
 				  ((eq? m 'write-int32) write-int32)
 				  ((eq? m 'write-int16) write-int16)
 				  ((eq? m 'write-string) write-string)
+				  ((eq? m 'write-bytevector) write-bytevector)
 				  ((eq? m 'write-byte) write-byte)
 				  ((eq? m 'write-op) write-op)
 				  ((eq? m 'size) size)
@@ -237,44 +240,57 @@
 	((writer 'write-int32) (get-var-id (cadr exp) meta))) ;4-byte var ID
 
 (define (compile-conditional exp writer meta)
-	(let [(main-bytecode (make-writer (open-output-string)))
-		  (else-bytecode (make-writer (open-output-string)))]
+	(let [(main-bv (make-bytevector-port))
+		  (else-bv (make-bytevector-port))]
+		(let [(main-bytecode (make-writer (car main-bv)))
+			  (else-bytecode (make-writer (car else-bv)))]
 
-		(compile-sequence (caddr exp) main-bytecode meta)
-		(compile-sequence (cadddr exp) else-bytecode meta)
-		(if (not (null? (cadddr exp)))
-			(begin 
-				((main-bytecode 'write-op) 'JA)
-				((main-bytecode 'write-int16) (else-bytecode 'size))))
+			(compile-sequence (caddr exp) main-bytecode meta)
+			(compile-sequence (cadddr exp) else-bytecode meta)
+			(if (not (null? (cadddr exp)))
+				(begin
+					((main-bytecode 'write-op) 'JA)
+					((main-bytecode 'write-int16) (else-bytecode 'size))))
 
-	((writer 'write-op) 'LOAD)
-	((writer 'write-int64) 0)
-	(compile-value (cadr exp) writer meta)
-	((writer 'write-op) 'IFICMPLE)
-	((writer 'write-int16) (main-bytecode 'size))
-	((writer 'write-string) (get-output-string (main-bytecode 'port)))
-	((writer 'write-string) (get-output-string (else-bytecode 'port)))
-	
-	))
+			((writer 'write-op) 'LOAD)
+			((writer 'write-int64) 0)
+			(compile-value (cadr exp) writer meta)
+			((writer 'write-op) 'IFICMPLE)
+			((writer 'write-int16) (main-bytecode 'size))
+			((writer 'write-bytevector) ((cadr main-bv)))
+			((writer 'write-bytevector) ((cadr else-bv))))))
 
 (define (compile-loop exp writer meta)
-	(let [(bytecode (make-writer (open-output-string)))]
+	(let [(body-bv (make-bytevector-port))
+		  (condition-bv (make-bytevector-port))]
+		(let [(body-bytecode (make-writer (car body-bv)))
+			  (condition-bytecode (make-writer (car condition-bv)))]
 
-		(compile-sequence (caddr exp) bytecode meta)
-		(if (tagged? exp 'for-loop)
-			(compile-expression (cadr (cdddr exp)) bytecode meta))
-		((bytecode 'write-op) 'JA)
-		((bytecode 'write-int16) (- (bytecode 'size)))
+			;initial statement
+			(if (tagged? exp 'for-loop)
+				(compile-expression (cadddr exp) writer meta))
 
-		(if (tagged? exp 'for-loop)
-			(compile-expression (cadddr exp) writer meta))
+			; loop condition
+			((condition-bytecode 'write-op) 'LOAD)
+			((condition-bytecode 'write-int64) 0)
+			(compile-value (cadr exp) condition-bytecode meta)
+			((condition-bytecode 'write-op) 'IFICMPLE)
 
-		((writer 'write-op) 'LOAD)
-		((writer 'write-int64) 0)
-		(compile-value (cadr exp) writer meta)
-		((writer 'write-op) 'IFICMPLE)
-		((writer 'write-int16) (bytecode 'size))
-		((writer 'write-string) (get-output-string (bytecode 'port)))))
+			; loop body
+			(compile-sequence (caddr exp) body-bytecode meta)
+
+			; post-loop statement
+			(if (tagged? exp 'for-loop)
+				(compile-expression (cadr (cdddr exp)) body-bytecode meta))
+
+			((body-bytecode 'write-op) 'JA)
+			;((body-bytecode 'write-int16) (- (+ (body-bytecode 'size) 2)))
+
+			((condition-bytecode 'write-int16) (+ (body-bytecode 'size) 2))
+			((condition-bytecode 'write-bytevector) ((cadr body-bv)))
+			; setting proper offset for the jump
+			((condition-bytecode 'write-int16) (- (+ (condition-bytecode 'size) 2)))
+			((writer 'write-bytevector) ((cadr condition-bv))))))
 
 (define (compile-expression exp writer meta)
 	(cond 	((declaration? exp)
@@ -307,8 +323,9 @@
 				(else (error (cadr exp) ": unknown argument type " (cadr (list-ref (cadddr exp) c))))))
 		(if (> c 0) (arg-type-loop (- c 1))))
 
-	(define (compile-func-bytecode block bytecode meta)
-		(let [(arg-num 0)]
+	(define (compile-func-bytecode block bv meta)
+		(let [(arg-num 0)
+			  (bytecode (make-writer (car bv)))]
 			(if (not (eq? (car (cadddr exp)) 'void))
 				(for-each 
 					(lambda (e) 
@@ -318,9 +335,9 @@
 						(set! arg-num (+ arg-num 1)))
 					(cadddr exp)))
 			(compile-sequence block bytecode meta)
-			(if (eq? (car (cadddr exp)) 'void) ((bytecode 'write-op) 'RETURN))
+			;(if (eq? (caddr exp) 'void) ((bytecode 'write-op) 'RETURN))
 			((writer 'write-int64) (bytecode 'size))
-			((writer 'write-string) (get-output-string (bytecode 'port)))))
+			((writer 'write-bytevector) ((cadr bv)))))
 		
 	;registering func id
 	(((meta 'local-vars) 'flush))
@@ -340,8 +357,7 @@
 		(error (cadr exp) ": no more than 16 arguments allowed")
 		(arg-type-loop 15))
 	
-	(compile-func-bytecode (car (cdr (cdddr exp))) (make-writer (open-output-string)) meta)
-	writer)
+	(compile-func-bytecode (car (cdr (cdddr exp))) (make-bytevector-port) meta))
 
 (define (compile-header ast writer meta)
 	(define (write-magic)
@@ -366,19 +382,24 @@
 	(write-const-pool)
 	(write-functions))
 
+(define (make-bytevector-port)
+	(call-with-values open-bytevector-output-port (lambda (p g) (list p g))))
+
 (define (compile-dwarf-file input-file output-file)
 	(let [(ast (analyze (tokenize (read-file input-file))))
-		  (writer (make-writer (open-output-file output-file)))
+		  (writer (make-writer (open-file-output-port output-file (file-options no-fail))))
 		  (meta (make-meta-info))]
 
 		(define (compile-functions ast)
-			(let [(bytecode (make-writer (open-output-string)))]
+			(let [(bv (make-bytevector-port))]
 				(if (null? ast)
 					'()
-					(cons (get-output-string ((compile-function (car ast) bytecode meta) 'port)) (compile-functions (cdr ast))))))
+					(begin
+						(compile-function (car ast) (make-writer (car bv)) meta)
+						(cons ((cadr bv)) (compile-functions (cdr ast)))))))
 
 		(define (write-functions fs)
-			(for-each (writer 'write-string) fs))
+			(for-each (writer 'write-bytevector) fs))
 
 		(let [(func-bytecode (compile-functions ast))]
 			(compile-header ast writer meta)
