@@ -87,6 +87,7 @@
 				(token-less 5 less)
 				(token-less-equals 5 less-or-equals)
 				(token-equals 5 equals)
+				(token-not-equals 5 not-equals)
 				(token-logical-and 2 and)
 				(token-logical-or 2 or)))
 
@@ -100,6 +101,7 @@
 			((tagged? t 'token-left-bracket) (analyze-brackets t tokens env))
 			((tagged? t 'token-plus) (analyze-expression 100 tokens env)) ;unary plus
 			((tagged? t 'token-number) (list 'const-value (cadr t) 'int))
+			((tagged? t 'token-float-number) (list 'const-value (cadr t) 'double))
 			((tagged? t 'token-string) (list 'const-value (cadr t) 'string))
 			((tagged? t 'token-symbol) 
 				(let [(var (look-up-variable (cadr t) env))]
@@ -147,17 +149,17 @@
 	(let [(type (analyze-type tokens))]
 		(if (null? type)
 			(error "bad cast to unknown type" type)
-			(if (or (eq? 'void (get-type left env)) (eq? 'void type)) 
+			(if (or (eq? 'void (get-type left)) (eq? 'void type))
 				(error "cannot cast void value or to void type")
-				(list 'cast type (get-type left env) left)))))
+				(list 'cast type (get-type left) left)))))
 
 (define (analyze-binary t left tokens env)
 	(let [(in (assq (car t) infix))]
 		(cond 
 			(in (let [(right (analyze-expression (cadr in) tokens env))]
-					(if (check-types left right env) 
+					(if (check-types left right)
 						(list (caddr in) left right)
-						(error "type mismatch" (get-type left env) (get-type right env)))))
+						(error "type mismatch" (get-type left) (get-type right)))))
 			((tagged? t 'token-pointer) (analyze-cast left tokens env))
 			(else (error "unknown binary operator" (car t))))))
 
@@ -191,25 +193,6 @@
 		(loop)
 		left))
 
-(define (check-signature sig call)
-	(cond 
-		((and (null? sig) (null? call)) #t)
-		((not (eq? (car sig) (car call))) #f)
-		(else (check-signature (cdr sig) (cdr call)))))
-
-(define (get-type exp env)
-	(cond
-		((type? exp) exp)
-		((null? exp) 'void)
-		((binop? exp) (get-type (caddr exp) env))
-		((const? exp) (caddr exp))
-		((relop? exp) 'int)
-		((cast? exp) (cadr exp))
-		((var? exp) (var-type (look-up-variable (cadr exp) env)))
-		((func-call? exp) (func-return-type (look-up-function (cadr exp) env)))))
-
-(define (check-types exp1 exp2 env) (eq? (get-type exp1 env) (get-type exp2 env)))
-
 (define (analyze-declaration choices tokens env)
 	((tokens 'save))
 	(let [(type (analyze-type tokens))
@@ -230,7 +213,7 @@
 		  		  (value (analyze-value tokens env))]
 				(if (or (null? eqv) (null? value) (not ((tokens 'has-next) 'token-semicolon)))
 					(fail choices tokens env)
-					(if (check-types (var-type var) value env)
+					(if (check-types (var-type var) value)
 						(success tokens (list 'assignment (var-name var) value))
 						(error "mismatched variable and assigned value types")))))))
 
@@ -244,7 +227,7 @@
 					(set! value (analyze-value tokens env)))
 				(display value) (newline)
 				(if ((tokens 'has-next) 'token-semicolon)
-					(if (check-types value (func-return-type (car (reverse (environment-functions env)))) env)
+					(if (check-types value (func-return-type (car (reverse (environment-functions env)))))
 						(success tokens (list 'return value))
 						(error "mismatched function and returned types"))
 					(error "bad return")))

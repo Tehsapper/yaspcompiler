@@ -11,14 +11,27 @@
 	(define escape?
 		(lambda (char) (eq? char #\\)))
 
+	(define decimal-point?
+		(lambda (char) (eq? char #\.)))
+
 	(define name?
 		(lambda (char) (or (char-alphabetic? char) (eq? char #\_))))
 
+	(define parse-next-float
+		(lambda (a i)
+			(if (char-numeric? (car i))
+				(parse-next-float (string-append a (string (car i))) (cdr i))
+				(list i 'token-float-number (string->number a)))))
+
 	(define parse-next-numerical 
 		(lambda (a i) 
-			(if (char-numeric? (car i)) 
-				(parse-next-numerical (string-append a (string (car i))) (cdr i)) 
-				(list i 'token-number (string->number a)))))
+			(cond
+				((char-numeric? (car i)) 
+					(parse-next-numerical (string-append a (string (car i))) (cdr i)))
+				((decimal-point? (car i))
+					(parse-next-float (string-append a (string (car i))) (cdr i)))
+				(else 
+					(list i 'token-number (string->number a))))))
 
 	(define parse-next-alphanum
 		(lambda (a i) 
@@ -59,7 +72,9 @@
 				  		( (eq? a #\; ) (list i 'token-semicolon))
 				  		( (eq? a #\, ) (list i 'token-comma))
 				  		( (eq? a #\* ) (list i 'token-star))
-				  		( (eq? a #\! ) (list i 'token-bang))
+				  		( (eq? a #\! ) (if (eq? (car i) #\=)
+				  						   (list (cdr i) 'token-not-equals)
+				  						   (list i 'token-bang)))
 				  		( (eq? a #\< ) (if (eq? (car i) #\=) 
 				  						   (list (cdr i) 'token-less-equals) 
 				  						   (list i 'token-less)))
