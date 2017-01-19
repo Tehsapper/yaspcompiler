@@ -22,6 +22,8 @@
 
 (define (func-call? exp) (tagged? exp 'function-call))
 
+(define (break? exp) (memq (car exp) '(break continue)))
+
 (define (loop? exp) (memq (car exp) '(for-loop while-loop do-loop)))
 
 (define (arithm-op? exp) (memq (car exp) '(add divide modulo substract multiply neg)))
@@ -40,6 +42,7 @@
 (define (check-signature sig call)
 	(cond
 		((and (null? sig) (null? call)) #t)
+		((or (null? sig) (null? call) #f))
 		((not (eq? (car sig) (car call))) #f)
 		(else (check-signature (cdr sig) (cdr call)))))
 
@@ -75,10 +78,13 @@
 					tmp)))
 		(define (push! arg)
 			(set! stack (append arg stack)))
+		(define (top)
+			(if (null? stack) '() (car stack)))
 		(define (dispatch msg)
 			(cond 
 				((eq? msg 'pop!) pop!)
 				((eq? msg 'push!) push!)
+				((eq? msg 'top) (top))
 				((eq? msg 'list) stack)
 				(else (error "unknown call" msg))))
 		dispatch))
@@ -110,6 +116,48 @@
 			(cond ((eq? m 'look-up) look-up)
 				  ((eq? m 'insert!) insert!)
 				  (else (error "unknown table dispatch call: " m))))
+		dispatch))
+
+(define (make-reloc-table)
+	(let [(local-table (list 'reloc))]
+
+		(define (look-up key)
+			(assoc key (cdr local-table)))
+
+		(define (insert! key value)
+			(let [(record (look-up key))]
+				(if record
+					(if (null? (cdr record))
+						(set-cdr! record (list value))
+						(append! record (list value)))
+					(set-cdr! local-table
+						(cons (list key value)
+							  (cdr local-table))))))
+		(define (get-list)
+			(cdr local-table))
+		(define (purge! key)
+			(let [(record (look-up key))]
+				(if record
+					(set-cdr! record '())
+					#f)))
+
+		(define (merge table offset)
+			; can be reduced if insert! allows us to append several values
+			(for-each
+				(lambda (r)
+					(for-each
+						(lambda (d) (insert! (car r) (+ d offset)))
+						(cdr r)))
+				((table 'get-list))))
+
+		(define (dispatch m)
+			(cond
+				((eq? m 'look-up) look-up)
+				((eq? m 'insert!) insert!)
+				((eq? m 'get-list) get-list)
+				((eq? m 'purge!) purge!)
+				((eq? m 'merge) merge)
+				(else (error "make-reloc-table" "unknown dispatch call" m))))
 		dispatch))
 
 (define (read-file filename) 

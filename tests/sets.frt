@@ -1,19 +1,5 @@
-double power(double x, int n)
-{
-	double result;
-	int i;
-
-	result = 1.0;
-	
-	for(i = 0; i < n; i = i + 1) { result = result * x; }
-	return result;
-}
-
-int fact(int a)
-{
-	if(a <= 1) { return 1; }
-	else { return a * fact(a-1); }
-}
+double power(double x, int n);
+int fact(int a);
 
 double exp(double x) 
 {
