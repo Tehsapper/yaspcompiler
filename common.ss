@@ -26,6 +26,8 @@
 
 (define (loop? exp) (memq (car exp) '(for-loop while-loop do-loop)))
 
+(define (function? exp) (tagged? exp 'function))
+
 (define (arithm-op? exp) (memq (car exp) '(add divide modulo substract multiply neg)))
 (define (rel-op? exp) (memq (car exp) '(equals not-equals greater less greater-or-equals less-or-equals)))
 (define (logical-op? exp) (memq (car exp) '(and or not)))

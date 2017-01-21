@@ -3,8 +3,6 @@
 (load "analyze.ss")
 (load "parse.ss")
 
-(define currently-compiled-func 0)
-
 (define op-list '(INVALID
 				  LOAD LOADS
 				  DADD IADD DSUB ISUB DMUL IMUL DDIV IDIV IMOD DNEG INEG 
@@ -44,7 +42,7 @@
 			(put-bytevector output bv)
 			(set! size (+ size (bytevector-length bv))))
 		(define (write-op op)
-			(write-byte (index op op-list (lambda () (error "no such operand" op)))))
+			(write-byte (index op op-list (lambda () (error "write-op" "no such operand" op)))))
 		(define (dispatch m) 
 			(cond ((eq? m 'write-sequence) write-sequence)
 				  ((eq? m 'write-double) write-double)
@@ -56,19 +54,19 @@
 				  ((eq? m 'write-byte) write-byte)
 				  ((eq? m 'write-op) write-op)
 				  ((eq? m 'size) size)
-				  (else (error "make-writer: unknown dispatch call" m))))
+				  (else (error "make-writer" "unknown dispatch call" m))))
 	
 		dispatch))
 
 (define (make-meta-info)
 	(let [(const-pool (make-const-pool))
-		  (local-vars (make-const-pool))
-		  (func-pool (make-const-pool))]
+		  (ctx-vars (make-ctx-vars))
+		  (func-registry (make-function-registry))]
 		(define (dispatch m)
 			(cond 
 				((eq? m 'const-pool) const-pool)
-				((eq? m 'local-vars) local-vars)
-				((eq? m 'func-pool) func-pool)
+				((eq? m 'ctx-vars) ctx-vars)
+				((eq? m 'func-registry) func-registry)
 				(else (error "meta-info" "unknown dispatch call" m))))
 		dispatch))
 
@@ -97,6 +95,58 @@
 				  (else (error "unknown call" m))))
 		dispatch))
 
+(define (make-function-registry)
+	(let [(registry '())]
+		(define (declare name)
+			(if (find name)
+				(error "function-registry" "function already declared" name)
+				(set! registry (append registry (list (list name '()))))))
+		(define (find name)
+			(define (loop l)
+				(if (null? l) #f (if (eq? name (caar l)) l (loop (cdr l)))))
+			(loop (reverse registry)))
+		(define (get-id name)
+			(cond ((find name) => (lambda (l) (length (cdr l))))
+				  (else #f)))
+		(define (definition name bytecode)
+			(cond ((find name) => (lambda (l) (set-car! (cdr (car l)) bytecode)))
+				  (else (error "function-registry" "undeclared function" name))))
+		(define (dispatch m)
+			(cond
+				((eq? m 'declare) declare)
+				((eq? m 'get-id) get-id)
+				((eq? m 'definition) definition)
+				((eq? m 'list) registry)
+				((eq? m 'size) (length registry))
+				(else (error "function-registry" "unknown dispatch call" m))))
+	dispatch))
+
+(define (make-ctx-vars)
+	(let [(ctxs (make-stack))]
+		(define (create! name)
+			((ctxs 'push!) (list (list name))))
+		(define (destroy!)
+			((ctxs 'pop!)))
+		(define (declare var)
+			(set-cdr! (ctxs 'top) (cons var (cdr (ctxs 'top)))))
+		(define (get-var-info var)
+			(define (loop l)
+				(cond ((null? l) #f)
+					  ((member var (cdar l)) => (lambda (e) (cons (caar l) (length (cdr e)))))
+					  (else (loop (cdr l)))))
+			(loop (ctxs 'list)))
+		(define (dispatch m)
+			(cond
+				((eq? m 'create!) create!)
+				((eq? m 'destroy!) destroy!)
+				((eq? m 'declare) declare)
+				((eq? m 'get-var-info) get-var-info)
+				((eq? m 'top) (ctxs 'top))
+				(else (error "ctx-vars" "unknown dispatch call" m))))
+		dispatch))
+
+(define (currently-compiled-func meta) (car ((meta 'ctx-vars) 'top)))
+
 (define (load-value writer value)
 	((writer 'write-op) 'LOAD)
 	((writer 'write-int64) value))
@@ -104,12 +154,9 @@
 	((writer 'write-op) op)
 	((writer 'write-int16) offset))
 
-(define (get-var-id id meta) 
-	(((meta 'local-vars) 'add) id))
-
 (define (compile-return exp writer meta)
 	(compile-value (cadr exp) writer meta)
-	(if (eq? currently-compiled-func 'main)
+	(if (eq? (currently-compiled-func meta) 'main)
 		((writer 'write-op) 'STOP)
 		((writer 'write-op) 'RETURN)))
 
@@ -128,8 +175,18 @@
 		(else (error "unsupported const value compiling for type " (caddr exp)))))
 
 (define (compile-var-value exp writer meta)
-	((writer 'write-op) 'LOADVAR)
-	((writer 'write-int32) (get-var-id (cadr exp) meta))) 
+	(cond ((((meta 'ctx-vars) 'get-var-info) (cadr exp)) => 
+		(lambda (var-info)
+			(if (eq? (car var-info) (currently-compiled-func meta))
+				(begin
+					((writer 'write-op) 'LOADVAR)
+					((writer 'write-int32) (cdr var-info)))
+				(begin
+					((writer 'write-op) 'LOADCTXVAR)
+					((writer 'label) (car var-info))
+					((writer 'write-int64) 0)
+					((writer 'write-int32) (cdr var-info))))))
+		(else (error "compile-var-value" "undeclared variable" (cadr exp)))))
 
 (define (compile-builtin-func exp writer meta)
 	(cond 
@@ -169,10 +226,8 @@
 	(if (binary-op? exp) (compile-value (caddr exp) writer meta))
 	(compile-value (cadr exp) writer meta)
 
-	(let [(op (get-op (get-type exp) (car exp)))]
-		(if op
-			((writer 'write-op) op)
-			(error "compile-arithmetic-op" "unimplemented operator for type" (car exp) (get-type exp)))))
+	(cond ((get-op (get-type exp) (car exp)) => (writer 'write-op))
+		  (else (error "compile-arithmetic-op" "unimplemented operator for type" (car exp) (get-type exp)))))
 
 (put-op 'int 'greater 'IFICMPG)
 (put-op 'int 'greater-or-equals 'IFICMPGE)
@@ -253,7 +308,7 @@
 			(error "compile-cast" "unimplemented cast from ... to ..." (caddr exp) (cadr exp)))))
 
 (define (compile-var-decl exp writer meta)
-	(((meta 'local-vars) 'add) (cadr exp)))
+	(((meta 'ctx-vars) 'declare) (cadr exp)))
 
 (define (compile-value exp writer pool)
 	(cond 
@@ -269,8 +324,19 @@
 
 (define (compile-assignment exp writer meta)
 	(compile-value (caddr exp) writer meta)
-	((writer 'write-op) 'STOREVAR)
-	((writer 'write-int32) (get-var-id (cadr exp) meta))) ;4-byte var ID
+
+	(cond ((((meta 'ctx-vars) 'get-var-info) (cadr exp)) => 
+		(lambda (var-info)
+			(if (eq? (car var-info) (currently-compiled-func meta))
+				(begin
+					((writer 'write-op) 'STOREVAR)
+					((writer 'write-int32) (cdr var-info)))
+				(begin
+					((writer 'write-op) 'STORECTXVAR)
+					((writer 'label) (car var-info))
+					((writer 'write-int64) 0)
+					((writer 'write-int32) (cdr var-info))))))
+		(else (error "compile-assignment" "undeclared variable" (cadr exp)))))
 
 (define (compile-conditional exp writer meta)
 	(if (eq? (get-type (cadr exp)) 'int)
@@ -353,6 +419,8 @@
 				(compile-return exp writer meta))
 			((break? exp)
 				(compile-break exp writer meta))
+			((function? exp)
+				(compile-function exp (make-bytecode) meta))
 			((conditional? exp)
 				(compile-conditional exp writer meta))
 			((loop? exp)
@@ -384,18 +452,17 @@
 					(lambda (e) 
 						((bytecode 'write-op) 'STOREVAR)
 						((bytecode 'write-int32) param-num)
-						(((meta 'local-vars) 'add) (car e))
+						(((meta 'ctx-vars) 'declare) (car e))
 						(set! param-num (+ param-num 1)))
 					(cadddr exp)))
 			(compile-sequence block bytecode meta)
-			;(if (eq? (caddr exp) 'void) ((bytecode 'write-op) 'RETURN))
 			((writer 'write-int64) (bytecode 'size))
 			((writer 'merge) bytecode)))
 		
-	;registering func id
-	(((meta 'local-vars) 'flush))
-	(((meta 'func-pool) 'add) (cadr exp))
-	(set! currently-compiled-func (cadr exp))
+	;compiling function header:
+	;registering function id and creating context for local variables
+	(((meta 'ctx-vars) 'create!) (cadr exp))
+	(((meta 'func-registry) 'declare) (cadr exp))
 	;interned id for function name string from const pool
 	((writer 'write-int64) (((meta 'const-pool) 'add) (symbol->string (cadr exp))))
 	;local variable count
@@ -410,7 +477,10 @@
 		(error (cadr exp) "no more than 16 parameters allowed")
 		(param-type-loop 15))
 
+	;now we're writing compiled function bytecode and putting it into function registry
 	(compile-func-bytecode (car (cdr (cdddr exp))) (make-bytecode) meta)
+	(((meta 'func-registry) 'definition) (cadr exp) writer)
+	(((meta 'ctx-vars) 'destroy!))
 	writer)
 
 (define (compile-header writer meta)
@@ -420,13 +490,13 @@
 		((writer 'write-int64) 1))
 	(define (write-functions)
 		;number of functions
-		((writer 'write-int64) ((meta 'func-pool) 'size)))
+		((writer 'write-int64) ((meta 'func-registry) 'size)))
 	(define (write-const-pool)
 		;const-pool size
 		((writer 'write-int64) (+ ((meta 'const-pool) 'size) 
 								  (apply + (map string-length ((meta 'const-pool) 'list)))))
 		(for-each
-			(lambda (c) 
+			(lambda (c)
 				((writer 'write-string) c)
 				((writer 'write-byte) #x00))
 			((meta 'const-pool) 'list)))
@@ -466,20 +536,13 @@
 
 (define (compile-dwarf-file input-file meta)
 	(let [(ast (analyze (tokenize (read-file input-file))))]
-
-		(define (compile-functions ast)
-			(if (null? ast)
-				'()
-				(cons (compile-function (car ast) (make-bytecode) meta) (compile-functions (cdr ast)))))
-		
 		(display "compiling file ") (display input-file) (newline)
-		(compile-functions ast)))
+		(for-each (lambda (node) (compile-function node (make-bytecode) meta)) ast)))
 
 (define (compile-dwarf output-file . input-files)
-	(let* [(meta (make-meta-info))
+	(let*  [(meta (make-meta-info))
 		   (port (open-file-output-port output-file (file-options no-fail)))
-		   (writer (make-writer port))
-		   (file-functions (map (lambda (file) (compile-dwarf-file file meta)) input-files))]
+		   (writer (make-writer port))]
 
 		(define (write-function func)
 			(let [(reloc (((func 'get-reloc-table) 'get-list)))
@@ -488,12 +551,14 @@
 				;assigning proper func-call ids
 				(for-each
 					(lambda (r)
-						(for-each
-							(lambda (offset) (bytevector-u64-native-set! bv offset (((meta 'func-pool) 'find) (car r))))
-							(cdr r)))
+						(let [(func-id (((meta 'func-registry) 'get-id) (car r)))]
+							(for-each
+								(lambda (offset) (bytevector-u64-native-set! bv offset func-id))
+								(cdr r))))
 					reloc)
 				((writer 'write-bytevector) bv)))
 
+		(for-each (lambda (file) (compile-dwarf-file file meta)) input-files)
 		(compile-header writer meta)
-		(for-each (lambda (f) (for-each write-function f)) file-functions)
+		(for-each (lambda (func) (write-function (cadr func))) ((meta 'func-registry) 'list))
 		(close-output-port port)))

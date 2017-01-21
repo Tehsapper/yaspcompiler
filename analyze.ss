@@ -2,13 +2,17 @@
 (load "parse.ss")
 
 (define make-environment
-	(lambda () (list 'env (make-stack) '())))
+	(lambda () (list 'env (make-stack) (make-stack))))
 
 ;it's a stack of contexts, which hold variable lists to be pushed or popped off upon ctx switch
 (define (environment-ctx-vars env) (cadr env)) 
 (define (environment-local-vars env) (car ((environment-ctx-vars env) 'list)))
 (define (environment-functions env) (caddr env))
-(define (get-local-var-count env) (cdddr (car (reverse (environment-functions env)))))
+(define (environment-local-functions env) (car ((environment-functions env) 'list)))
+
+(define (current-function env)
+	(car (reverse (cadr ((environment-functions env) 'list)))))
+(define (get-local-var-count env) (cdddr (current-function env)))
 
 (define (analyze-type tokens)
 	(let ((x ((tokens 'has-next) 'token-symbol)))
@@ -19,8 +23,11 @@
 	(let ((x ((tokens 'has-next) 'token-symbol)))
 		(if (null? x) '() (cadr x))))
 
-(define (create-context env) (((environment-ctx-vars env) 'push!) (list '())))
-(define (delete-context env) (((environment-ctx-vars env) 'pop!)))
+(define (create-context env)
+	(((environment-ctx-vars env) 'push!) (list '())))
+
+(define (delete-context env)
+	(((environment-ctx-vars env) 'pop!)))
 
 (define (var-type var) (cadr var))
 (define (var-name var) (car var))
@@ -29,47 +36,37 @@
 (define (func-name func) (car func))
 (define (func-params func) (caddr func))
 
+(define (look-up-context name ctx)
+	(define (loop c)
+		(if (null? c)
+			'()
+			(let [(match (assoc name (car c)))]
+				(if match match (loop (cdr c))))))
+	(loop ctx))
+
+(define (look-up-variable name env)
+	(look-up-context name ((environment-ctx-vars env) 'list)))
+
+(define (look-up-function name env)
+	(look-up-context name ((environment-functions env) 'list)))
+
 (define (declare-variable var env)
 	(if (eq? (var-type var) 'void) 
-		(error "variable cannot be void" var)
+		(error "variable declaration" "variable cannot be void" var)
 		(if (null? (look-up-variable (var-name var) env)) 
 			(begin
 				(if (null? (environment-local-vars env)) 
 					(set-car! ((environment-ctx-vars env) 'list) (list var)) 
 					(append! (environment-local-vars env) (list var)))
 				(set-car! (get-local-var-count env) (+ (car (get-local-var-count env)) 1)))
-			(error "variable already declared" (var-name var)))))
-
-(define (look-up-variable name env)
-	(define (local-loop vars)
-		(if (null? vars) 
-			'()
-			(if (eq? (var-name (car vars)) name) 
-				(car vars)
-				(local-loop (cdr vars)))))
-	(define (loop ctx)
-		(if (null? ctx) 
-			'()
-			(let ((var (local-loop (car ctx))))
-				(if (null? var)
-					(loop (cdr ctx))
-					var))))
-	(loop ((environment-ctx-vars env) 'list)))
+			(error "variable declaration" "variable already declared" (var-name var)))))
 
 (define (declare-function func env)
-	(if (null? (look-up-function (func-name func) env)) 
-			(if (null? (environment-functions env)) 
-				(set-car! (cddr env) (list func)) 
-				(append! (environment-functions env) (list func)))
-			(error "function already declared" (func-name func))))
-
-(define (look-up-function name env)
-	(let loop ((funcs (environment-functions env)))
-		(if (null? funcs) 
-			'()
-			(if (eq? (func-name (car funcs)) name) 
-				(car funcs) 
-				(loop (cdr funcs))))))
+	(if (null? (look-up-function (func-name func) env))
+			(if (null? (environment-local-functions env))
+				(set-car! ((environment-functions env) 'list) (list func))
+				(append! (environment-local-functions env) (list func)))
+			(error "function declaration" "function already declared" (func-name func))))
 
 (define (analyze-variable tokens env)
 	(let ((name (analyze-name tokens)))
@@ -108,16 +105,16 @@
 					(if (null? var) 
 						(let [(func (look-up-function (cadr t) env))]
 							(if (null? func)
-								(error "unknown named identifier: " (cadr t))
+								(error "primary expression" "unknown named identifier" (cadr t))
 								(analyze-func-value func tokens env)))
 						(list 'var-value (var-name var) (var-type var)))))
-			(else (error "unknown identifier: " t)))))
+			(else (error "primary expression" "unknown identifier" t)))))
 
 (define (analyze-brackets t tokens env)
 	(let [(expr (analyze-expression 0 tokens env))]
 		(if (null? ((tokens 'has-next) 'token-right-bracket))
-		  	(error "unbalanced parentheses in expression" ((tokens 'peek)))
-		  	expr)))
+			(error "expression" "unbalanced parentheses in expression" ((tokens 'peek)))
+			expr)))
 		  	
 
 (define (analyze-func-value func tokens env)
@@ -135,16 +132,16 @@
 					arg-list)))
 
 		(if (null? ((tokens 'has-next) 'token-left-bracket))
-			(error "missing parentheses in function call" (func-name func))
+			(error "function call" "missing parentheses in function call" (func-name func))
 		  	(begin
 		  		(if (eq? ((tokens 'peek)) 'token-right-bracket)
 					(set! arg-list '(void))
 		  			(arg-loop))
 		  		(if (null? ((tokens 'has-next) 'token-right-bracket))
-					(error "mismatched parentheses in function call" (func-name func))
+					(error "function call" "mismatched parentheses in function call" (func-name func))
 					(if (check-signature (if (eq? (car (func-params func)) 'void) '(void) (map cadr (func-params func))) (map get-type arg-list))
 						(list 'function-call (func-name func) (func-return-type func) arg-list)
-						(error "wrong argument types for function call")))))))
+						(error "function call" "wrong argument types for function call")))))))
 		  	
 
 (define (analyze-cast left tokens env)
@@ -214,7 +211,19 @@
 					(fail choices tokens env)
 					(if (check-types (var-type var) value)
 						(success tokens (list 'assignment (var-name var) value))
-						(error "mismatched variable and assigned value types")))))))
+						(error "assignment statement" "mismatched variable and assigned value types")))))))
+
+(define (does-return? block)
+	(let loop [(exp block)]
+		(cond
+			((null? exp) #f)
+			((return? (car exp)) #t)
+			((conditional? (car exp))
+				(if (and (does-return? (caddr (car exp))) (does-return? (cadddr (car exp))))
+					#t (loop (cdr exp))))
+			((loop? (car exp))
+				(if (does-return? (caddr (car exp))) #t (loop (cdr exp))))
+			(else (loop (cdr exp))))))
 
 (define (analyze-return choices tokens env)
 	((tokens 'save))
@@ -224,10 +233,10 @@
 				(if (not (eq? (car ((tokens 'peek))) 'token-semicolon))
 					(set! value (analyze-value tokens env)))
 				(if ((tokens 'has-next) 'token-semicolon)
-					(if (check-types value (func-return-type (car (reverse (environment-functions env)))))
+					(if (check-types value (func-return-type (current-function env)))
 						(success tokens (list 'return value))
-						(error "mismatched function and returned types"))
-					(error "bad return")))
+						(error "return statement" "mismatched function and returned types"))
+					(error "return statement" "missing semicolon")))
 			(fail choices tokens env))))
 
 (define (analyze-func-call choices tokens env)
@@ -248,16 +257,16 @@
 				(if ((tokens 'has-next) 'token-right-bracket)
 					(let [(main-clause (analyze-block tokens env))]
 						(if (eq? main-clause 'block-fail)
-							(error "main clause block fail")
+							(error "if conditional" "main clause block fail")
 							(let [(else-keyword ((tokens 'peek)))
 								  (else-clause '())]
 								(if (and (eq? (car else-keyword) 'token-symbol) (eq? (cadr else-keyword) 'else))
 									(begin
 										((tokens 'advance))
 										(set! else-clause (analyze-block tokens env))))
-								(if (eq? else-clause 'block-fail) (error "else clause block fail"))
+								(if (eq? else-clause 'block-fail) (error "if conditional" "else clause block fail"))
 								(success tokens (list 'conditional value main-clause else-clause)))))
-					(error "mismatched parentheses at if condition")))	; if we matched both if keyword and a left-bracket, we're assured
+					(error "if conditional" "mismatched parentheses at if condition")))	; if we matched both if keyword and a left-bracket, we're assured
 			(fail choices tokens env))))
 
 (define (analyze-while-loop choices tokens env)
@@ -270,7 +279,7 @@
 						(if (eq? body 'block-fail)
 							(error "while body block fail")
 							(success tokens (list 'while-loop value body))))
-					(error "mismatched parentheses at while loop condition")))
+					(error "while loop" "mismatched parentheses at while loop condition")))
 			(fail choices tokens env))))
 
 (define (analyze-for-loop choices tokens env)
@@ -287,8 +296,8 @@
 								(if (eq? body 'block-fail)
 									(error "for body block fail")
 									(success tokens (list 'for-loop condition body initial post))))
-							(error "mismatched parentheses at for loop condition")))
-					(error "missing semicolon at for loop")))
+							(error "for loop" "mismatched parentheses at for loop condition")))
+					(error "for loop" "missing semicolon at for loop")))
 			(fail choices tokens env))))
 
 (define (analyze-break choices tokens env)
@@ -305,12 +314,20 @@
 			(success tokens (list 'continue))
 			(fail choices tokens env))))
 
+(define (analyze-local-function choices tokens env)
+	((tokens 'save))
+	(let [(ast (analyze-function tokens env))]
+		(if (null? ast)
+			(fail choices tokens env)
+			(success tokens ast))))
+
 (define (analyze-end-of-block choices tokens env)
 	(if (eq? (car ((tokens 'peek))) 'token-right-curly-bracket)
 		'()		;valid statement
-		(error "unknown statement type starting with token" ((tokens 'peek)))))
+		(error "analyze" "unknown statement type starting with token" ((tokens 'peek)))))
 
 (define statement-choices (list analyze-declaration
+								analyze-local-function
 								analyze-assignment
 								analyze-return
 								analyze-break
@@ -349,9 +366,10 @@
 			'block-fail
 			statements)))
 
-(define make-function-ast
-	(lambda (return_type name params block env)
-		(list 'function name return_type params block (car (get-local-var-count env)))))
+(define (make-function-ast return_type name params block env)
+	(let [(count (car (get-local-var-count env)))]
+		(((environment-functions env) 'pop!))
+		(list 'function name return_type params block count)))
 
 (define (analyze-function-param-list tokens env)
 	((tokens 'save))
@@ -379,19 +397,16 @@
 			param-list)))
 
 (define (analyze-function tokens env)
-	((tokens 'save))
-	(create-context env)
 	(let   [(return-type (analyze-type tokens))
 			(name (analyze-name tokens))
 		 	(left-bracket ((tokens 'has-next) 'token-left-bracket))]
 
 		  	(if (or (null? return-type) (null? name) (null? left-bracket))
-		  		(begin 
-		  			(delete-context env)
-		  			((tokens 'restore))
-		  			'())
+				'()
 				(let [(params (analyze-function-params tokens env))]
 					(declare-function (list name return-type params 0) env)
+					(((environment-functions env) 'push!) (list '()))
+					(create-context env)
 					;function declaration form
 					(if (null? ((tokens 'has-next) 'token-semicolon))
 						(begin
@@ -402,13 +417,13 @@
 							(let [(block (analyze-block tokens env))]
 								(delete-context env)
 								(if (eq? block 'block-fail) ;block actually can be empty
-									(error "analyze-function" "bad function block")
-								(begin
-									((tokens 'accept))
-									(make-function-ast return-type name params block env)))))
+									(error "analyze-function" "bad function block" name)
+									(if (does-return? block)
+										(make-function-ast return-type name params block env)
+										(error "analyze-function" "function does not return in all cases" name)))))
 						(begin
+							(((environment-functions env) 'pop!))
 							(delete-context env)
-							((tokens 'accept))
 							(analyze-function tokens env)))))))
 
 (define (declare-builtin env)
@@ -417,6 +432,7 @@
 (define (analyze token-list)
 	(let ((env (make-environment))
 		  (token-provider (make-token-provider token-list)))
+	(((environment-functions env) 'push!) (list '()))
 	(declare-builtin env)
 	(let rec ((func (analyze-function token-provider env)))
 		(if (null? func) 
