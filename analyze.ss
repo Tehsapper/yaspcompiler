@@ -119,7 +119,6 @@
 
 (define (analyze-func-value func tokens env)
 	(let [(arg-list '())]
-
 		(define (arg-loop)
 			(let [(value (analyze-expression 0 tokens env))]
 				(if (null? arg-list)
@@ -147,9 +146,9 @@
 (define (analyze-cast left tokens env)
 	(let [(type (analyze-type tokens))]
 		(if (null? type)
-			(error "bad cast to unknown type" type)
+			(error "analyze-cast" "bad cast to unknown type" type)
 			(if (or (eq? 'void (get-type left)) (eq? 'void type))
-				(error "cannot cast void value or to void type")
+				(error "analyze-cast" "cannot cast void value or to void type")
 				(list 'cast type (get-type left) left)))))
 
 (define (analyze-binary t left tokens env)
@@ -158,18 +157,16 @@
 			(in (let [(right (analyze-expression (cadr in) tokens env))]
 					(if (check-types left right)
 						(list (caddr in) left right)
-						(error "type mismatch" (get-type left) (get-type right)))))
+						(error "analyze-binary" "type mismatch" (get-type left) (get-type right)))))
 			((tagged? t 'token-pointer) (analyze-cast left tokens env))
-			(else (error "unknown binary operator" (car t))))))
+			(else (error "analyze-binary" "unknown binary operator" (car t))))))
 
 (define (get-binding-power t)
-	(let [(in (assq (car t) infix))
-		  (pre (assq (car t) prefix))]
 	(cond 
-		(in (cadr in))
-		(pre (cadr pre))
+		((assq (car t) infix) => cadr)
+		((assq (car t) prefix) => cadr)
 		((tagged? t 'token-pointer) 200)
-		(else 0))))
+		(else 0)))
 
 (define (analyze-value tokens env)
 	(analyze-expression 0 tokens env))
@@ -286,10 +283,10 @@
 	((tokens 'save))
 	(let [(for-keyword (analyze-name tokens))]
 		(if (and (eq? for-keyword 'for) ((tokens 'has-next) 'token-left-bracket))
-			(let [(initial (analyze-statement (list analyze-assignment analyze-end-of-block) tokens env))
+			(let [(initial (analyze-statement (list analyze-assignment analyze-func-call analyze-end-of-block) tokens env))
 				  (condition (analyze-value tokens env))]
 				(if ((tokens 'has-next) 'token-semicolon)
-					(let [(post (analyze-statement (list analyze-assignment analyze-end-of-block) tokens env))]
+					(let [(post (analyze-statement (list analyze-assignment analyze-func-call analyze-end-of-block) tokens env))]
 				  
 						(if ((tokens 'has-next) 'token-right-bracket)
 							(let [(body (analyze-block tokens env))]
@@ -351,7 +348,7 @@
 
 (define (analyze-statements tokens env)
 	(let rec ((statement (analyze-statement statement-choices tokens env)))
-		(display statement) (newline)
+		;(display statement) (newline)
 		(if (null? statement)
 			'() 
 			(cons statement (rec (analyze-statement statement-choices tokens env))))))
