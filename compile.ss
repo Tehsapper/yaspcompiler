@@ -74,13 +74,11 @@
 	(let [(count 0)
 		  (pool '())]
 		(define (add str)
-  			(let ((tail (member str (reverse pool))))
-    			(if tail 
-    				(length (cdr tail))
-    				(begin
-    					(set! pool (append pool (list str)))
-    					(set! count (+ count 1))
-    					(- count 1)))))
+			(index str pool
+				(lambda ()
+					(set! pool (append pool (list str)))
+					(set! count (+ count 1))
+					(- count 1))))
 		(define (flush) 
 			(set! pool '())
 			(set! count 0))
@@ -92,7 +90,7 @@
 				  ((eq? m 'flush) flush)
 				  ((eq? m 'size) count)
 				  ((eq? m 'list) pool)
-				  (else (error "unknown call" m))))
+				  (else (error "make-const-pool" "unknown dispatch call" m))))
 		dispatch))
 
 (define (make-function-registry)
@@ -105,8 +103,10 @@
 			(define (loop l)
 				(if (null? l) #f (if (eq? name (caar l)) l (loop (cdr l)))))
 			(loop (reverse registry)))
-		(define (get-id name)
-			(cond ((find name) => (lambda (l) (length (cdr l))))
+		; interestingly all CALL operands are actually patched in the VM, so we have to return the id of the interned string of function name in the const pool
+		; if we can find this name in our registry, it is implied that it was registered in the const pool as well
+		(define (get-id name meta)
+			(cond ((find name) (((meta 'const-pool) 'find) (symbol->string name)))
 				  (else #f)))
 		(define (definition name bytecode)
 			(cond ((find name) => (lambda (l) (set-car! (cdr (car l)) bytecode)))
@@ -172,7 +172,7 @@
 			(begin
 				((writer 'write-op) 'LOAD)
 				((writer 'write-double) (cadr exp))))
-		(else (error "unsupported const value compiling for type " (caddr exp)))))
+		(else (error "compile-const-value" "unsupported const value compiling for type" (caddr exp)))))
 
 (define (compile-var-value exp writer meta)
 	(cond ((((meta 'ctx-vars) 'get-var-info) (cadr exp)) => 
@@ -442,7 +442,7 @@
 				((eq? (cadr (list-ref (cadddr exp) c)) 'int) ((writer 'write-byte) #x00))
 				((eq? (cadr (list-ref (cadddr exp) c)) 'double) ((writer 'write-byte) #x01))
 				((eq? (cadr (list-ref (cadddr exp) c)) 'string) ((writer 'write-byte) #x02))
-				(else (error (cadr exp) "unknown paramater type" (cadr (list-ref (cadddr exp) c))))))
+				(else (error (cadr exp) "compile-function" "unknown paramater type" (cadr (list-ref (cadddr exp) c))))))
 		(if (> c 0) (param-type-loop (- c 1))))
 
 	(define (compile-func-bytecode block bytecode meta)
@@ -474,7 +474,7 @@
 		((writer 'write-int64) 0)
 		((writer 'write-int64) (length (cadddr exp))))
 	(if (< 16 (length (cadddr exp))) 
-		(error (cadr exp) "no more than 16 parameters allowed")
+		(error "compile-function" "no more than 16 parameters allowed" (cadr exp))
 		(param-type-loop 15))
 
 	;now we're writing compiled function bytecode and putting it into function registry
@@ -551,14 +551,18 @@
 				;assigning proper func-call ids
 				(for-each
 					(lambda (r)
-						(let [(func-id (((meta 'func-registry) 'get-id) (car r)))]
-							(for-each
-								(lambda (offset) (bytevector-u64-native-set! bv offset func-id))
-								(cdr r))))
+						(let [(func-id (((meta 'func-registry) 'get-id) (car r) meta))]
+							(if func-id
+								(for-each (lambda (offset) (bytevector-u64-native-set! bv offset func-id)) (cdr r))
+								(error "linkage" "undefined reference to function" (car r)))))
 					reloc)
 				((writer 'write-bytevector) bv)))
 
 		(for-each (lambda (file) (compile-dwarf-file file meta)) input-files)
 		(compile-header writer meta)
 		(for-each (lambda (func) (write-function (cadr func))) ((meta 'func-registry) 'list))
-		(close-output-port port)))
+		(if (close-output-port port)
+			(begin
+				(display "successfully written and closed output file ")
+				(display output-file) (display "!") (newline))
+			(error "compile-dwarf" "failed to close output file" output-file))))
