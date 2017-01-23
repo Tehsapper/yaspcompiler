@@ -133,7 +133,7 @@
 		(if (null? ((tokens 'has-next) 'token-left-bracket))
 			(error "function call" "missing parentheses in function call" (func-name func))
 		  	(begin
-		  		(if (eq? ((tokens 'peek)) 'token-right-bracket)
+				(if (eq? (car ((tokens 'peek))) 'token-right-bracket)
 					(set! arg-list '(void))
 		  			(arg-loop))
 		  		(if (null? ((tokens 'has-next) 'token-right-bracket))
