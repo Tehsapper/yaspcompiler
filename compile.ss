@@ -197,7 +197,7 @@
 
 (define (compile-func-call exp writer meta)
 	;push values onto stack
-	(for-each (lambda (e) (compile-value e writer meta)) (reverse (cadddr exp)))
+	(if (not (eq? (car (cadddr exp)) 'void)) (for-each (lambda (e) (compile-value e writer meta)) (reverse (cadddr exp))))
 	;call the function
 	(if (builtin-func? exp)
 		(compile-builtin-func exp writer meta)
